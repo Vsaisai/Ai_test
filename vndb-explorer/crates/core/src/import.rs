@@ -33,22 +33,163 @@ pub struct Stats {
 
 /// Run a full import. `progress` receives human-readable status lines.
 pub fn import(src: Source, db_path: &Path, progress: &dyn Fn(&str)) -> Result<Stats> {
-    let reader: Box<dyn Read> = match src {
+    let dir = db_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| ".".into());
+    let downloaded;
+    let file: &Path = match src {
         Source::Url(u) => {
-            progress(&format!("Downloading {u}"));
-            let resp = crate::http::blocking_client(None)?
-                .get(u)
-                .send()
-                .context("download of the VNDB dump failed")?;
-            if !resp.status().is_success() {
-                bail!("dump download failed: HTTP {}", resp.status());
-            }
-            Box::new(resp)
+            downloaded = download(u, &dir, progress)?;
+            &downloaded
         }
-        Source::File(p) => Box::new(
-            std::fs::File::open(p).with_context(|| format!("cannot open {}", p.display()))?,
-        ),
+        Source::File(p) => p,
     };
+    let reader: Box<dyn Read> = Box::new(
+        std::fs::File::open(file).with_context(|| format!("cannot open {}", file.display()))?,
+    );
+    let stats = import_reader(reader, db_path, progress)?;
+    if matches!(src, Source::Url(_)) {
+        let _ = std::fs::remove_file(file);
+    }
+    Ok(stats)
+}
+
+/// Download the dump into `dir`, resuming after dropped connections (mobile networks, VPNs,
+/// the phone going to sleep). A partial file is kept between attempts and between runs, and is
+/// only resumed if it belongs to the same dump (the dated file name behind `-latest`).
+pub fn download(url: &str, dir: &Path, progress: &dyn Fn(&str)) -> Result<std::path::PathBuf> {
+    use std::io::Write;
+    std::fs::create_dir_all(dir)?;
+    let http = crate::http::blocking_client(None)?;
+    // `-latest` redirects to the dated file: resolve it so a resume never mixes two dumps.
+    let probe = http
+        .get(url)
+        .header("Range", "bytes=0-0")
+        .send()
+        .context("cannot reach dl.vndb.org")?;
+    let real = probe.url().to_string();
+    let name = real
+        .rsplit('/')
+        .next()
+        .filter(|n| n.ends_with(".tar.zst"))
+        .unwrap_or("vndb-db.tar.zst")
+        .to_string();
+    let total: Option<u64> = probe
+        .headers()
+        .get("content-range")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.rsplit('/').next())
+        .and_then(|v| v.parse().ok());
+    drop(probe);
+    // forget partial files of older dumps
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let n = e.file_name().to_string_lossy().to_string();
+            if n.ends_with(".tar.zst.part") && n != format!("{name}.part") {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+    let part = dir.join(format!("{name}.part"));
+    let done = dir.join(&name);
+    if done.exists()
+        && total
+            .map(|t| {
+                std::fs::metadata(&done)
+                    .map(|m| m.len() == t)
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false)
+    {
+        return Ok(done);
+    }
+    let mb = |b: u64| b as f64 / 1_048_576.0;
+    let mut attempt = 0u32;
+    loop {
+        let have = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
+        if let Some(t) = total {
+            if have >= t {
+                break;
+            }
+        }
+        progress(&if have > 0 {
+            format!("Resuming download at {:.0} MB", mb(have))
+        } else {
+            format!("Downloading {real}")
+        });
+        let result = (|| -> Result<()> {
+            let mut req = http.get(&real);
+            if have > 0 {
+                req = req.header("Range", format!("bytes={have}-"));
+            }
+            let mut resp = req.send()?;
+            let status = resp.status();
+            let append = status.as_u16() == 206;
+            if !status.is_success() {
+                bail!("HTTP {status}");
+            }
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .append(append)
+                .truncate(!append)
+                .open(&part)?;
+            let mut got = if append { have } else { 0 };
+            let mut last_report = got;
+            let mut buf = vec![0u8; 256 * 1024];
+            loop {
+                let n = resp.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                f.write_all(&buf[..n])?;
+                got += n as u64;
+                if got - last_report >= 8 * 1_048_576 {
+                    last_report = got;
+                    match total {
+                        Some(t) => progress(&format!(
+                            "Downloaded {:.0} of {:.0} MB ({:.0}%)",
+                            mb(got),
+                            mb(t),
+                            got as f64 * 100.0 / t as f64
+                        )),
+                        None => progress(&format!("Downloaded {:.0} MB", mb(got))),
+                    }
+                }
+            }
+            f.flush()?;
+            if let Some(t) = total {
+                if got < t {
+                    bail!("connection closed at {:.0} of {:.0} MB", mb(got), mb(t));
+                }
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => break,
+            Err(e) => {
+                attempt += 1;
+                if attempt >= 10 {
+                    return Err(e.context("download failed after 10 attempts; press the button again to continue where it stopped"));
+                }
+                let wait = (2u64 << attempt.min(4)).min(30);
+                progress(&format!("Connection lost ({e:#}), retrying in {wait} s"));
+                std::thread::sleep(std::time::Duration::from_secs(wait));
+            }
+        }
+    }
+    std::fs::rename(&part, &done)?;
+    progress("Download complete");
+    Ok(done)
+}
+
+/// Import from any reader of a `.tar.zst` dump.
+pub fn import_reader(
+    reader: Box<dyn Read>,
+    db_path: &Path,
+    progress: &dyn Fn(&str),
+) -> Result<Stats> {
     if let Some(d) = db_path.parent() {
         std::fs::create_dir_all(d)?;
     }
