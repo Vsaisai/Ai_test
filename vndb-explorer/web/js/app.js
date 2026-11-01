@@ -1,5 +1,5 @@
 // Entry point: navigation + hash router.
-import { applyTheme, settings, save } from './store.js';
+import { applyTheme, settings, save, IN_APP, APP_VERSION, RELEASES_API, RELEASES_PAGE } from './store.js';
 import { h, toast, jobPanel } from './ui.js';
 import { api } from './api.js';
 import { viewHome, viewShelf, viewSearch, viewTags, viewTag, viewVn, viewMy, viewSettings } from './views.js';
@@ -119,6 +119,48 @@ function reasonRu(c) {
   return `последняя полная загрузка ${Math.round(c.days_since_import)} дн. назад`;
 }
 
+// ---------- app updates (Android build only) ----------
+
+function newer(a, b) {
+  const pa = a.split('.').map(Number); const pb = b.split('.').map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) > (pb[i] || 0);
+  }
+  return false;
+}
+
+export async function checkAppUpdate({ interactive = false } = {}) {
+  if (!IN_APP) return null;
+  const s = settings();
+  if (!interactive && Date.now() - (s.lastAppCheck || 0) < 24 * 3600 * 1000) return null;
+  try {
+    const r = await fetch(RELEASES_API, { headers: { Accept: 'application/vnd.github+json' } });
+    if (r.status === 404) {
+      // private repository: the API needs a login, the releases page in the browser works
+      if (interactive) showBanner('Версию не проверить автоматически (репозиторий закрыт). Откройте страницу релизов:', [h('a', { class: 'btn primary', href: RELEASES_PAGE }, 'Релизы на GitHub')]);
+      return null;
+    }
+    if (!r.ok) throw new Error(`GitHub: HTTP ${r.status}`);
+    const list = await r.json();
+    save({ lastAppCheck: Date.now() });
+    const rel = list.find(x => !x.draft && !x.prerelease && /^mobile-v/.test(x.tag_name));
+    if (!rel) { if (interactive) toast('Релизов приложения пока нет'); return null; }
+    const ver = rel.tag_name.replace(/^mobile-v/, '');
+    const apk = (rel.assets || []).find(a => a.name.endsWith('.apk'));
+    if (newer(ver, APP_VERSION) && apk) {
+      showBanner(`Вышла новая версия приложения ${ver} (у вас ${APP_VERSION}).`,
+        [h('a', { class: 'btn primary', href: apk.browser_download_url }, 'Скачать APK'),
+         h('a', { class: 'btn', href: rel.html_url }, 'Что нового')]);
+    } else if (interactive) {
+      toast(`Установлена последняя версия (${APP_VERSION})`);
+    }
+    return rel;
+  } catch (e) {
+    if (interactive) toast(e.message);
+    return null;
+  }
+}
+
 applyTheme();
 buildNav();
 window.addEventListener('hashchange', route);
@@ -126,6 +168,7 @@ route();
 setTimeout(() => checkUpdates(), 1500);
 // a job may already be running (e.g. the app was reopened during a download)
 api.status().then(st => { if (st.ready && st.import?.running) watchJob('✅ Готово.'); }).catch(() => {});
+setTimeout(() => checkAppUpdate(), 4000);
 
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   navigator.serviceWorker.register('sw.js').catch(() => {});

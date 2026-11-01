@@ -1,6 +1,6 @@
 // All screens of the app. Each view renders into `root` and may return a cleanup function.
 import { api } from './api.js';
-import { settings, save, baseRequest, langList, DEFAULTS } from './store.js';
+import { settings, save, baseRequest, langList, DEFAULTS, IN_APP, APP_VERSION } from './store.js';
 import {
   h, card, cover, spinner, errorBox, toast, debounce, langBadges, fmtLength,
   LANG_NAMES, PLATFORMS, KIND, MARKS, ROOT_RU, shouldBlur, jobPanel,
@@ -176,6 +176,7 @@ function emptyDb(st) {
     h('h2', {}, 'База ещё не загружена'),
     h('p', {}, 'Приложение работает офлайн с полной копией VNDB (все новеллы, теги, релизы, ссылки, включая 18+). ' +
       'Скачайте дамп один раз — дальше всё работает без интернета (кроме обложек при первом показе).'),
+    IN_APP ? h('p', { class: 'muted' }, 'Загрузка ~190 МБ, лучше по Wi-Fi. Займёт около 150 МБ памяти телефона. Можно свернуть приложение — прогресс будет в уведомлении.') : null,
     btn, box);
 }
 
@@ -670,10 +671,16 @@ export async function viewSettings(root) {
         h('button', { class: 'btn', onclick: async () => { const m = await import('./app.js'); m.checkUpdates({ force: true, interactive: true }); } }, 'Проверить обновления'),
         h('button', { class: 'btn', onclick: async () => { await api.sync(); toast('Подтягиваю новые релизы'); setTimeout(loadStatus, 800); } }, 'Подтянуть новые релизы'))),
     h('section', { class: 'panel form' }, h('h2', {}, 'Каталоги переводов и сообщества'), srcBox),
-    h('section', { class: 'panel form' }, h('h2', {}, 'Сервер'),
-      field('Адрес сервера', text('apiBase', 'пусто = этот же сервер'), 'Нужно для мобильного приложения: например http://192.168.1.10:8080'),
-      h('p', { class: 'muted small' }, 'Чтобы открыть с телефона: запустите на ПК «vndb-web serve --addr 0.0.0.0:8080» и откройте http://IP-компьютера:8080 в браузере телефона. ' +
-        'Там же можно «Установить приложение» / «На экран Домой».'),
-      h('button', { class: 'btn', onclick: () => { save({ ...DEFAULTS }); toast('Настройки сброшены'); location.reload(); } }, 'Сбросить настройки')),
+    IN_APP
+      ? h('section', { class: 'panel form' }, h('h2', {}, 'Приложение'),
+        h('p', {}, `VN Shelf для Android, версия ${APP_VERSION}. Новые версии публикуются в GitHub Releases.`),
+        h('div', { class: 'toolbar' },
+          h('button', { class: 'btn', onclick: async () => { const m = await import('./app.js'); m.checkAppUpdate({ interactive: true }); } }, 'Проверить версию приложения'),
+          h('button', { class: 'btn', onclick: () => { save({ ...DEFAULTS }); toast('Настройки сброшены'); location.reload(); } }, 'Сбросить настройки')))
+      : h('section', { class: 'panel form' }, h('h2', {}, 'Сервер'),
+        field('Адрес сервера', text('apiBase', 'пусто = этот же сервер'), 'Нужно для мобильного приложения: например http://192.168.1.10:8080'),
+        h('p', { class: 'muted small' }, 'Чтобы открыть с телефона: запустите на ПК «vndb-web serve --addr 0.0.0.0:8080» и откройте http://IP-компьютера:8080 в браузере телефона. ' +
+          'Там же можно «Установить приложение» / «На экран Домой».'),
+        h('button', { class: 'btn', onclick: () => { save({ ...DEFAULTS }); toast('Настройки сброшены'); location.reload(); } }, 'Сбросить настройки')),
   );
 }
