@@ -121,3 +121,60 @@ export function debounce(fn, ms = 250) {
 }
 
 export const ROOT_RU = { Theme: 'Тема', Character: 'Персонажи', Setting: 'Сеттинг', Plot: 'Сюжет', Style: 'Стиль' };
+
+// ---------- job progress (download / import / sync) ----------
+
+export const JOB_TITLES = { import: 'Загрузка базы VNDB', sync: 'Новые новеллы и релизы', sources: 'Индексы каталогов' };
+let detailsOpen = false;
+
+function bar(percent, cls = '') {
+  const indet = percent === null || percent === undefined;
+  return h('div', { class: `bar ${cls} ${indet ? 'indet' : ''}`, role: 'progressbar', 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-valuenow': indet ? undefined : Math.round(percent) },
+    h('i', { style: indet ? {} : { width: `${Math.max(0, Math.min(100, percent))}%` } }));
+}
+
+function amount(p) {
+  const mb = b => (b / 1048576).toFixed(b >= 10485760 ? 0 : 1).replace('.', ',');
+  if (p.unit === 'bytes') return p.total ? `${mb(p.done)} из ${mb(p.total)} МБ` : (p.done ? `${mb(p.done)} МБ` : '—');
+  return p.total ? `${p.done} из ${p.total}` : (p.done ? String(p.done) : '—');
+}
+
+/** Detailed progress, like the "more details" view of a file copy dialog. */
+export function jobPanel(job, { compact = false, link = null } = {}) {
+  const p = job.progress;
+  const title = JOB_TITLES[job.kind] || 'Обработка';
+  if (job.error) {
+    return h('div', { class: 'job error-job' },
+      h('div', { class: 'job-head' }, h('b', {}, `${title}: ошибка`)),
+      h('p', { class: 'small' }, job.error),
+      job.kind === 'import' ? h('p', { class: 'muted small' }, 'Нажмите кнопку ещё раз — скачивание продолжится с места обрыва.') : null);
+  }
+  if (!job.running) return h('div', { class: 'job' }, h('div', { class: 'job-head' }, h('b', {}, `${title}: готово`)));
+  const overall = p ? p.overall_percent : 0;
+  const stageLine = p ? `Этап ${p.step} из ${p.steps} · ${p.label}` : 'Подготовка…';
+  if (compact) {
+    return h('div', { class: 'job compact' },
+      h('div', { class: 'job-head' }, h('b', {}, `${Math.floor(overall)}%`), h('span', {}, ` ${title} · ${p ? p.label : 'подготовка'}`),
+        link ? h('a', { href: link, class: 'small' }, 'подробнее') : null),
+      bar(overall),
+      p && p.detail ? h('div', { class: 'muted small' }, p.detail) : null);
+  }
+  const rows = p ? [
+    ['Этап', `${p.step} из ${p.steps}: ${p.label}`],
+    ['Выполнено', `${amount(p)}${p.stage_percent !== null && p.stage_percent !== undefined ? ` (${p.stage_percent.toFixed(1).replace('.', ',')}%)` : ''}`],
+    ['Скорость', p.speed > 0 ? (p.unit === 'bytes' ? `${(p.speed / 1048576).toFixed(1).replace('.', ',')} МБ/с` : `${p.speed.toFixed(0)} в сек.`) : '—'],
+    ['Осталось (этап)', p.eta || '—'],
+    ['Прошло всего', p.elapsed],
+  ] : [];
+  const details = h('details', { class: 'job-details', open: detailsOpen, ontoggle: e => { detailsOpen = e.target.open; } },
+    h('summary', {}, 'Подробнее'),
+    h('dl', { class: 'meta' }, rows.flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, v)])),
+    h('pre', { class: 'log' }, (job.log || []).slice(-8).join('\n')));
+  return h('div', { class: 'job' },
+    h('div', { class: 'job-head' }, h('span', { class: 'job-pct' }, `${Math.floor(overall)}%`), h('b', {}, title)),
+    bar(overall, 'big'),
+    h('div', { class: 'job-stage' }, h('span', {}, stageLine), p && p.stage_percent !== null && p.stage_percent !== undefined ? h('span', { class: 'muted' }, `${Math.floor(p.stage_percent)}%`) : null),
+    bar(p ? p.stage_percent : null, 'thin'),
+    p && p.detail ? h('div', { class: 'job-detail' }, p.detail) : null,
+    details);
+}

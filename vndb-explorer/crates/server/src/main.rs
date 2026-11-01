@@ -73,7 +73,11 @@ fn main() -> Result<()> {
                 None => vndb_core::import::Source::Url(vndb_core::import::DUMP_URL),
             };
             let t = std::time::Instant::now();
-            let stats = vndb_core::import::import(src, &db, &|m| eprintln!("{m}"))?;
+            let stats = vndb_core::import::import(
+                src,
+                &db,
+                &vndb_core::progress::Reporter::text(&|m: &str| eprintln!("{m}")),
+            )?;
             eprintln!(
                 "Imported in {:.0?}: {}",
                 t.elapsed(),
@@ -94,7 +98,10 @@ fn main() -> Result<()> {
                         c.reason.unwrap_or_default()
                     );
                 } else {
-                    let r = vndb_core::sync::apply(&db, &|m| eprintln!("{m}"))?;
+                    let r = vndb_core::sync::apply(
+                        &db,
+                        &vndb_core::progress::Reporter::text(&|m: &str| eprintln!("{m}")),
+                    )?;
                     eprintln!("{}", serde_json::to_string(&r)?);
                 }
             }

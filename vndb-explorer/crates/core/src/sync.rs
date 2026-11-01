@@ -6,6 +6,7 @@
 //! (automatically or after asking the user).
 
 use crate::db;
+use crate::progress::{Progress, Reporter};
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -99,6 +100,7 @@ impl Api {
     }
 
     /// All pages of `id > after`, sorted by id, at most `cap` items.
+    #[allow(clippy::too_many_arguments)]
     fn newer(
         &self,
         endpoint: &str,
@@ -106,18 +108,39 @@ impl Api {
         after: u32,
         fields: &str,
         cap: usize,
-        progress: &dyn Fn(&str),
+        rep: &Reporter,
+        (stage, step): (&'static str, u32),
     ) -> Result<Vec<Value>> {
         let mut out = Vec::new();
         let mut page = 1;
+        let mut total = None;
+        rep.progress(Progress {
+            stage,
+            step,
+            steps: 4,
+            done: 0,
+            total: None,
+            unit: "items",
+        });
         loop {
             let v = self.post(
                 endpoint,
-                &json!({ "filters": ["id", ">", format!("{prefix}{after}")], "fields": fields, "sort": "id", "results": 100, "page": page }),
+                &json!({ "filters": ["id", ">", format!("{prefix}{after}")], "fields": fields, "sort": "id", "results": 100, "page": page, "count": page == 1 }),
             )?;
+            if let Some(c) = v["count"].as_u64() {
+                total = Some(c.min(cap as u64));
+            }
             let items = v["results"].as_array().cloned().unwrap_or_default();
             out.extend(items);
-            progress(&format!("Fetched {} new {endpoint} entries", out.len()));
+            rep.progress(Progress {
+                stage,
+                step,
+                steps: 4,
+                done: out.len() as u64,
+                total,
+                unit: "items",
+            });
+            rep.log(&format!("Fetched {} new {endpoint} entries", out.len()));
             if !v["more"].as_bool().unwrap_or(false) || out.len() >= cap {
                 break;
             }
@@ -222,12 +245,13 @@ fn level(v: &Value) -> i64 {
 }
 
 /// Fetch and store everything newer than the local database.
-pub fn apply(db_path: &Path, progress: &dyn Fn(&str)) -> Result<Applied> {
+pub fn apply(db_path: &Path, rep: &Reporter) -> Result<Applied> {
+    let progress = |m: &str| rep.log(m);
     let mut c = db::open_catalog_rw(db_path)?;
     let (last_vn, last_release) = max_ids(&c)?;
     let api = Api::new()?;
     progress("Looking for new visual novels");
-    let vns = api.newer("vn", "v", last_vn, VN_FIELDS, 5000, progress)?;
+    let vns = api.newer("vn", "v", last_vn, VN_FIELDS, 5000, rep, ("sync_vn", 1))?;
     progress("Looking for new releases");
     let rels = api.newer(
         "release",
@@ -235,8 +259,10 @@ pub fn apply(db_path: &Path, progress: &dyn Fn(&str)) -> Result<Applied> {
         last_release,
         RELEASE_FIELDS,
         20000,
-        progress,
+        rep,
+        ("sync_rel", 2),
     )?;
+    rep.stage("sync_save", 3, 4);
 
     let tx = c.transaction()?;
     let mut touched: BTreeSet<u32> = BTreeSet::new();
