@@ -31,6 +31,130 @@ pub struct JobStatus {
     pub log: Vec<String>,
     pub error: Option<String>,
     pub finished: bool,
+    /// Live progress (see [`progress_view`]).
+    pub progress: Option<Value>,
+    #[serde(skip)]
+    track: Track,
+}
+
+/// Speed / time bookkeeping for the progress view.
+#[derive(Clone)]
+struct Track {
+    started: std::time::Instant,
+    stage: &'static str,
+    last_t: std::time::Instant,
+    last_done: u64,
+    speed: f64,
+}
+
+impl Default for Track {
+    fn default() -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            started: now,
+            stage: "",
+            last_t: now,
+            last_done: 0,
+            speed: 0.0,
+        }
+    }
+}
+
+fn fmt_mb(b: f64) -> String {
+    let mb = b / 1_048_576.0;
+    if mb >= 10.0 {
+        format!("{mb:.0}")
+    } else {
+        format!("{mb:.1}").replace('.', ",")
+    }
+}
+
+fn fmt_dur(secs: f64) -> String {
+    let s = secs.max(0.0).round() as u64;
+    if s >= 3600 {
+        format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
+    } else {
+        format!("{}:{:02}", s / 60, s % 60)
+    }
+}
+
+/// Turn a raw [`Progress`] into what the UI and the Android notification show:
+/// stage and overall percentages, smoothed speed, time left in the stage, elapsed time,
+/// and a ready-made Russian summary line.
+fn progress_view(kind: &str, p: &vndb_core::progress::Progress, tr: &mut Track) -> Value {
+    use vndb_core::progress::{stage_label, stage_weight, stages_of};
+    let now = std::time::Instant::now();
+    if tr.stage != p.stage {
+        tr.stage = p.stage;
+        tr.last_t = now;
+        tr.last_done = p.done;
+        tr.speed = 0.0;
+    } else {
+        let dt = now.duration_since(tr.last_t).as_secs_f64();
+        if dt >= 0.7 && p.done >= tr.last_done {
+            let inst = (p.done - tr.last_done) as f64 / dt;
+            tr.speed = if tr.speed == 0.0 {
+                inst
+            } else {
+                tr.speed * 0.7 + inst * 0.3
+            };
+            tr.last_t = now;
+            tr.last_done = p.done;
+        }
+    }
+    let frac = p
+        .total
+        .filter(|t| *t > 0)
+        .map(|t| (p.done as f64 / t as f64).min(1.0));
+    let stages = stages_of(kind);
+    let all: f64 = stages.iter().map(|s| stage_weight(s)).sum();
+    let pos = stages.iter().position(|s| *s == p.stage);
+    let before: f64 = pos
+        .map(|i| stages[..i].iter().map(|s| stage_weight(s)).sum())
+        .unwrap_or(0.0);
+    let overall = ((before + stage_weight(p.stage) * frac.unwrap_or(0.0)) / all * 100.0).min(100.0);
+    let eta = match (p.total, tr.speed > 0.0) {
+        (Some(t), true) if t > p.done => Some((t - p.done) as f64 / tr.speed),
+        _ => None,
+    };
+    let mut parts = Vec::new();
+    match (p.unit, p.total) {
+        ("bytes", Some(t)) => parts.push(format!(
+            "{} из {} МБ",
+            fmt_mb(p.done as f64),
+            fmt_mb(t as f64)
+        )),
+        ("bytes", None) if p.done > 0 => parts.push(format!("{} МБ", fmt_mb(p.done as f64))),
+        (_, Some(t)) => parts.push(format!("{} из {}", p.done, t)),
+        _ => {}
+    }
+    if tr.speed > 0.0 {
+        parts.push(if p.unit == "bytes" {
+            format!("{} МБ/с", fmt_mb(tr.speed))
+        } else {
+            format!("{:.0} в сек.", tr.speed)
+        });
+    }
+    if let Some(e) = eta {
+        parts.push(format!("осталось ~{}", fmt_dur(e)));
+    }
+    json!({
+        "stage": p.stage,
+        "label": stage_label(p.stage),
+        "step": p.step,
+        "steps": p.steps,
+        "done": p.done,
+        "total": p.total,
+        "unit": p.unit,
+        "stage_percent": frac.map(|f| (f * 1000.0).round() / 10.0),
+        "overall_percent": (overall * 10.0).round() / 10.0,
+        "speed": tr.speed,
+        "eta_secs": eta.map(|e| e.round()),
+        "elapsed_secs": tr.started.elapsed().as_secs(),
+        "elapsed": fmt_dur(tr.started.elapsed().as_secs_f64()),
+        "eta": eta.map(fmt_dur),
+        "detail": parts.join(" · "),
+    })
 }
 
 pub struct AppState {
@@ -181,7 +305,9 @@ struct ImportReq {
 pub fn start_job(
     state: Arc<AppState>,
     kind: &str,
-    work: impl FnOnce(&AppState, &dyn Fn(&str)) -> anyhow::Result<bool> + Send + 'static,
+    work: impl FnOnce(&AppState, &vndb_core::progress::Reporter) -> anyhow::Result<bool>
+        + Send
+        + 'static,
 ) -> bool {
     {
         let mut st = state.import.lock().unwrap();
@@ -194,16 +320,34 @@ pub fn start_job(
             log: vec!["Starting".into()],
             error: None,
             finished: false,
+            progress: None,
+            track: Track::default(),
         };
     }
     std::thread::spawn(move || {
         let log = |m: &str| {
             eprintln!("{m}");
-            state.import.lock().unwrap().log.push(m.to_string());
+            let mut st = state.import.lock().unwrap();
+            st.log.push(m.to_string());
+            let n = st.log.len();
+            if n > 300 {
+                st.log.drain(..n - 300);
+            }
         };
-        let res = work(&state, &log).and_then(|reload| {
+        let prog = |p: &vndb_core::progress::Progress| {
+            let mut st = state.import.lock().unwrap();
+            let kind = st.kind.clone();
+            let mut tr = st.track.clone();
+            st.progress = Some(progress_view(&kind, p, &mut tr));
+            st.track = tr;
+        };
+        let rep = vndb_core::progress::Reporter::new(&log, &prog);
+        let res = work(&state, &rep).and_then(|reload| {
             if reload {
                 log("Loading catalog");
+                let steps =
+                    vndb_core::progress::stages_of(&state.import.lock().unwrap().kind).len() as u32;
+                rep.stage("load", steps, steps);
                 let c = Catalog::open(&state.data_dir.join("catalog.sqlite"))?;
                 *state.catalog.write().unwrap() = Some(Arc::new(c));
             }
@@ -245,9 +389,10 @@ pub fn start_sources_refresh(state: Arc<AppState>) -> bool {
         let defs = st.sources.read().unwrap().clone();
         // separate connection: indexing must not block the UI's user database lock
         let conn = vndb_core::db::open_user(&st.data_dir.join("user.sqlite"))?;
-        let res = vndb_core::sources::refresh_index(&defs, &conn, log)?;
+        log.stage("sources", 1, 1);
+        let res = vndb_core::sources::refresh_index(&defs, &conn, &|m: &str| log.log(m))?;
         for (id, n) in res {
-            log(&format!("{id}: {n} pages"));
+            log.log(&format!("{id}: {n} pages"));
         }
         Ok(false)
     })

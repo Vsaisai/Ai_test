@@ -3,7 +3,7 @@ import { api } from './api.js';
 import { settings, save, baseRequest, langList, DEFAULTS, IN_APP, APP_VERSION } from './store.js';
 import {
   h, card, cover, spinner, errorBox, toast, debounce, langBadges, fmtLength,
-  LANG_NAMES, PLATFORMS, KIND, MARKS, ROOT_RU, shouldBlur,
+  LANG_NAMES, PLATFORMS, KIND, MARKS, ROOT_RU, shouldBlur, jobPanel,
 } from './ui.js';
 import { img } from './api.js';
 
@@ -156,26 +156,28 @@ export async function viewHome(root) {
 }
 
 function emptyDb(st) {
-  const tail = l => (l || []).slice(-12).join('\n');
-  const log = h('pre', { class: 'log' }, tail(st.import?.log));
+  const box = h('div', {});
   const btn = h('button', { class: 'btn primary', onclick: async () => {
     btn.disabled = true;
     await api.startImport();
     poll();
   } }, 'Скачать базу VNDB (~190 МБ)');
+  const render = job => box.replaceChildren(job && (job.running || job.error) && job.kind === 'import' ? jobPanel(job) : '');
   const poll = async () => {
-    const s = await api.status();
-    log.textContent = tail(s.import.log) + (s.import.error ? `\nОшибка: ${s.import.error}\nНажмите кнопку ещё раз — загрузка продолжится с места обрыва.` : '');
+    const s = await api.status().catch(() => null);
+    if (!s) { setTimeout(poll, 2000); return; }
+    render(s.import);
     if (s.ready) { toast('База готова'); location.reload(); return; }
-    if (s.import.running) setTimeout(poll, 1500); else btn.disabled = false;
+    if (s.import.running) setTimeout(poll, 1000); else btn.disabled = false;
   };
+  render(st.import);
   if (st.import?.running) { btn.disabled = true; setTimeout(poll, 500); }
   return h('div', { class: 'panel center' },
     h('h2', {}, 'База ещё не загружена'),
     h('p', {}, 'Приложение работает офлайн с полной копией VNDB (все новеллы, теги, релизы, ссылки, включая 18+). ' +
       'Скачайте дамп один раз — дальше всё работает без интернета (кроме обложек при первом показе).'),
-    IN_APP ? h('p', { class: 'muted' }, 'Загрузка ~190 МБ, лучше по Wi-Fi. Займёт около 150 МБ памяти телефона и 1–3 минуты; приложение должно оставаться открытым.') : null,
-    btn, log);
+    IN_APP ? h('p', { class: 'muted' }, 'Загрузка ~190 МБ, лучше по Wi-Fi. Займёт около 150 МБ памяти телефона. Можно свернуть приложение — прогресс будет в уведомлении.') : null,
+    btn, box);
 }
 
 // ---------- shelf page ----------
@@ -635,14 +637,13 @@ export async function viewSettings(root) {
   const loadStatus = async () => {
     try {
       const st = await api.status();
-      const log = h('pre', { class: 'log' }, (st.import.log || []).slice(-8).join('\n') + (st.import.error ? `\nОшибка: ${st.import.error}` : ''));
       const btn = h('button', { class: 'btn primary', disabled: st.import.running, onclick: async () => {
         btn.disabled = true; await api.startImport(); toast('Обновление запущено'); setTimeout(loadStatus, 1000);
       } }, st.ready ? 'Обновить базу из VNDB' : 'Скачать базу VNDB');
       dbBox.replaceChildren(
         h('p', {}, st.ready ? `В базе ${st.vns.toLocaleString('ru')} новелл и ${st.tags} тегов. Дамп VNDB от ${st.dump_timestamp}, импорт ${st.imported_at} (UTC).` : 'База не загружена.'),
-        btn, (st.import.log || []).length ? h('div', {}, h('div', { class: 'muted small' }, `Последняя задача: ${({ import: 'полная загрузка', sync: 'новые релизы', sources: 'индексы каталогов' })[st.import.kind] || st.import.kind}`), log) : null);
-      if (st.import.running) setTimeout(loadStatus, 1500);
+        btn, (st.import.running || st.import.error) ? jobPanel(st.import) : (st.import.kind ? h('div', { class: 'muted small' }, `Последняя задача: ${({ import: 'полная загрузка', sync: 'новые релизы', sources: 'индексы каталогов' })[st.import.kind] || st.import.kind} — ${st.import.finished ? 'готово' : '…'}`) : null));
+      if (st.import.running) setTimeout(loadStatus, 1000);
       else if (st.ready && (st.import.log || []).includes('Ready')) api.resetTags();
     } catch (e) { dbBox.replaceChildren(errorBox(e, loadStatus)); }
   };
