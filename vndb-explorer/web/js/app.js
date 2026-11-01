@@ -1,6 +1,7 @@
 // Entry point: navigation + hash router.
-import { applyTheme } from './store.js';
-import { h } from './ui.js';
+import { applyTheme, settings, save } from './store.js';
+import { h, toast } from './ui.js';
+import { api } from './api.js';
 import { viewHome, viewShelf, viewSearch, viewTags, viewTag, viewVn, viewMy, viewSettings } from './views.js';
 
 const NAV = [
@@ -61,10 +62,68 @@ document.getElementById('quicksearch').addEventListener('submit', e => {
   location.hash = q ? `#/search?q=${encodeURIComponent(q)}` : '#/search';
 });
 
+// ---------- updates ----------
+
+const banner = h('div', { class: 'update-banner', hidden: true });
+document.body.insertBefore(banner, document.getElementById('view'));
+
+export function showBanner(text, actions = []) {
+  banner.replaceChildren(h('span', {}, text), ...actions, h('button', { class: 'linkish', onclick: () => { banner.hidden = true; } }, 'Скрыть'));
+  banner.hidden = false;
+}
+
+async function watchJob(doneText) {
+  for (;;) {
+    await new Promise(r => setTimeout(r, 2000));
+    const st = await api.status().catch(() => null);
+    if (!st) continue;
+    const job = st.import;
+    if (job.running) {
+      showBanner(`⏳ ${job.log[job.log.length - 1] || 'Обновление…'}`);
+      continue;
+    }
+    if (job.error) showBanner(`⚠️ Обновление не удалось: ${job.error}`);
+    else { showBanner(doneText, [h('button', { class: 'btn', onclick: () => location.reload() }, 'Обновить страницу')]); api.resetTags(); }
+    return;
+  }
+}
+
+export async function checkUpdates({ force = false, interactive = false } = {}) {
+  const s = settings();
+  if (!interactive && s.updatePolicy === 'manual') return null;
+  if (!force && Date.now() - (s.lastUpdateCheck || 0) < 6 * 3600 * 1000) return null;
+  let r;
+  try { r = await api.updates(force); } catch (e) { if (interactive) toast(`Нет связи с VNDB: ${e.message}`); return null; }
+  if (!r.ready) return r;
+  save({ lastUpdateCheck: Date.now() });
+  const c = r.check;
+  const fresh = c.new_vns + c.new_releases;
+  const full = async () => { await api.startImport(); showBanner('⏳ Скачиваю свежую базу VNDB…'); watchJob('✅ База полностью обновлена.'); };
+  if (c.big) {
+    if (s.updatePolicy === 'auto' && !interactive) { full(); return r; }
+    showBanner(`База сильно отстала от VNDB (${reasonRu(c)}). Нужна полная загрузка (~190 МБ).`,
+      [h('button', { class: 'btn primary', onclick: full }, 'Обновить сейчас')]);
+  } else if (fresh > 0) {
+    const go = async () => { await api.sync(); showBanner(`⏳ Добавляю ${c.new_vns} новелл и ${c.new_releases} релизов…`); watchJob(`✅ Добавлено новелл: ${c.new_vns}, релизов: ${c.new_releases}.`); };
+    if (!interactive) go();
+    else showBanner(`На VNDB появилось ${c.new_vns} новелл и ${c.new_releases} релизов.`, [h('button', { class: 'btn primary', onclick: go }, 'Подтянуть')]);
+  } else if (interactive) {
+    toast('База актуальна');
+  }
+  return r;
+}
+
+function reasonRu(c) {
+  if (c.new_vns > 1500) return `новых новелл: ${c.new_vns}`;
+  if (c.new_releases > 6000) return `новых релизов: ${c.new_releases}`;
+  return `последняя полная загрузка ${Math.round(c.days_since_import)} дн. назад`;
+}
+
 applyTheme();
 buildNav();
 window.addEventListener('hashchange', route);
 route();
+setTimeout(() => checkUpdates(), 1500);
 
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   navigator.serviceWorker.register('sw.js').catch(() => {});

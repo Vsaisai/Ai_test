@@ -270,10 +270,6 @@ pub fn fallback(title: &str) -> Vec<Source> {
     vec![
         mk("itch.io", format!("https://itch.io/search?q={q}")),
         mk(
-            "F95zone",
-            format!("https://f95zone.to/search/?q={q}&t=post&c[title_only]=1"),
-        ),
-        mk(
             "Steam",
             format!("https://store.steampowered.com/search/?term={q}"),
         ),

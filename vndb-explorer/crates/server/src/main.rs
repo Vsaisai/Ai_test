@@ -3,7 +3,7 @@
 //!   vndb-web import            download the full VNDB dump and build the local database
 //!   vndb-web serve             run the web interface (default http://127.0.0.1:8080)
 
-mod api;
+use vndb_web::api;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -33,6 +33,14 @@ enum Cmd {
         #[arg(long)]
         file: Option<PathBuf>,
     },
+    /// Fetch new visual novels and releases through the VNDB API (fast, small)
+    Sync {
+        /// Only report how far behind the local database is
+        #[arg(long)]
+        check: bool,
+    },
+    /// Refresh third-party catalog indexes (vngames.ru ...) and report matches
+    Sources,
     /// Start the web interface
     Serve {
         /// Address to listen on. Use 0.0.0.0:8080 to open it from a phone in the same network
@@ -74,6 +82,67 @@ fn main() -> Result<()> {
             eprintln!("Database: {}", db.display());
             Ok(())
         }
+        Cmd::Sync { check } => {
+            let db = data.join("catalog.sqlite");
+            let th = vndb_core::sync::Thresholds::default();
+            let c = vndb_core::sync::check(&db, &th)?;
+            eprintln!("{}", serde_json::to_string_pretty(&c)?);
+            if !check {
+                if c.big {
+                    eprintln!(
+                        "Too far behind ({}), run `vndb-web import` for a full update.",
+                        c.reason.unwrap_or_default()
+                    );
+                } else {
+                    let r = vndb_core::sync::apply(&db, &|m| eprintln!("{m}"))?;
+                    eprintln!("{}", serde_json::to_string(&r)?);
+                }
+            }
+            Ok(())
+        }
+        Cmd::Sources => {
+            let defs = vndb_core::sources::Sources::load(&data)?;
+            let user = vndb_core::db::open_user(&data.join("user.sqlite"))?;
+            let res = vndb_core::sources::refresh_index(&defs, &user, &|m| eprintln!("{m}"))?;
+            eprintln!("Indexed: {res:?}");
+            let cat = vndb_core::Catalog::open(&data.join("catalog.sqlite"))?;
+            let conn = cat.connection()?;
+            let mut matched = std::collections::HashSet::new();
+            for v in &cat.vns {
+                let aliases: String =
+                    conn.query_row("SELECT aliases FROM vn WHERE id = ?1", [v.id], |r| r.get(0))?;
+                let aliases: Vec<String> = aliases.lines().map(String::from).collect();
+                for l in vndb_core::sources::links_for(
+                    &defs,
+                    &user,
+                    v,
+                    &aliases,
+                    &["en".into()],
+                    "community",
+                ) {
+                    if l.direct {
+                        matched.insert(l.url);
+                    }
+                }
+            }
+            for (id, n) in res {
+                let m = matched
+                    .iter()
+                    .filter(|u| {
+                        u.contains(&id)
+                            || defs.sources.iter().any(|s| {
+                                s.id == id
+                                    && s.index
+                                        .as_ref()
+                                        .map(|i| u.starts_with(&i.prefix))
+                                        .unwrap_or(false)
+                            })
+                    })
+                    .count();
+                eprintln!("{id}: {m} of {n} pages matched to VNDB entries");
+            }
+            Ok(())
+        }
         Cmd::Serve { addr, auto_import } => {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -82,6 +151,8 @@ fn main() -> Result<()> {
                 let state = Arc::new(api::AppState::new(data)?);
                 if auto_import && !state.ready() {
                     api::start_import(state.clone(), None);
+                } else {
+                    api::maybe_refresh_sources(state.clone());
                 }
                 let app = api::router(state.clone());
                 let listener = tokio::net::TcpListener::bind(addr).await?;

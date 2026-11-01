@@ -16,17 +16,21 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 use vndb_core::search::{Card, SearchRequest, Sort};
 use vndb_core::shelves::{self, Shelves};
+use vndb_core::sources::Sources;
 use vndb_core::Catalog;
 
 #[derive(RustEmbed)]
 #[folder = "../../web/"]
 struct Assets;
 
+/// Background job (full import, API sync or source indexing); one at a time.
 #[derive(Default, Clone, Serialize)]
-pub struct ImportStatus {
+pub struct JobStatus {
+    pub kind: String,
     pub running: bool,
     pub log: Vec<String>,
     pub error: Option<String>,
+    pub finished: bool,
 }
 
 pub struct AppState {
@@ -34,7 +38,10 @@ pub struct AppState {
     pub catalog: RwLock<Option<Arc<Catalog>>>,
     pub shelves: RwLock<Shelves>,
     pub user: Mutex<Connection>,
-    pub import: Mutex<ImportStatus>,
+    pub import: Mutex<JobStatus>,
+    pub sources: RwLock<Sources>,
+    /// Cached result of the last update check: (when, value)
+    pub updates: Mutex<Option<(std::time::Instant, Value)>>,
     pub http: reqwest::Client,
 }
 
@@ -58,9 +65,11 @@ impl AppState {
             shelves: RwLock::new(Shelves::load(&data_dir)?),
             user: Mutex::new(vndb_core::db::open_user(&data_dir.join("user.sqlite"))?),
             catalog: RwLock::new(catalog),
-            import: Mutex::new(ImportStatus::default()),
+            import: Mutex::new(JobStatus::default()),
+            sources: RwLock::new(Sources::load(&data_dir)?),
+            updates: Mutex::new(None),
             http: reqwest::Client::builder()
-                .user_agent(concat!("vndb-explorer/", env!("CARGO_PKG_VERSION")))
+                .user_agent(vndb_core::http::USER_AGENT)
                 .timeout(std::time::Duration::from_secs(30))
                 .build()?,
             data_dir,
@@ -121,6 +130,10 @@ pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/api/status", get(status))
         .route("/api/import", post(import))
+        .route("/api/updates", get(updates))
+        .route("/api/sync", post(sync))
+        .route("/api/sources", get(sources_info))
+        .route("/api/sources/refresh", post(sources_refresh))
         .route("/api/tags", get(tags))
         .route("/api/tags/:id", get(tag_detail))
         .route("/api/search", post(search))
@@ -163,49 +176,167 @@ struct ImportReq {
     file: Option<String>,
 }
 
-pub fn start_import(state: Arc<AppState>, file: Option<PathBuf>) -> bool {
+/// Run `work` in a background thread as the single active job. `work` returns true when the
+/// catalog file changed and must be reloaded.
+pub fn start_job(
+    state: Arc<AppState>,
+    kind: &str,
+    work: impl FnOnce(&AppState, &dyn Fn(&str)) -> anyhow::Result<bool> + Send + 'static,
+) -> bool {
     {
         let mut st = state.import.lock().unwrap();
         if st.running {
             return false;
         }
-        *st = ImportStatus {
+        *st = JobStatus {
+            kind: kind.to_string(),
             running: true,
             log: vec!["Starting".into()],
             error: None,
+            finished: false,
         };
     }
     std::thread::spawn(move || {
-        let db = state.data_dir.join("catalog.sqlite");
         let log = |m: &str| {
             eprintln!("{m}");
             state.import.lock().unwrap().log.push(m.to_string());
         };
-        let src = match &file {
-            Some(p) => vndb_core::import::Source::File(p),
-            None => vndb_core::import::Source::Url(vndb_core::import::DUMP_URL),
-        };
-        let res = vndb_core::import::import(src, &db, &log).and_then(|_| {
-            log("Loading catalog");
-            Catalog::open(&db)
+        let res = work(&state, &log).and_then(|reload| {
+            if reload {
+                log("Loading catalog");
+                let c = Catalog::open(&state.data_dir.join("catalog.sqlite"))?;
+                *state.catalog.write().unwrap() = Some(Arc::new(c));
+            }
+            Ok(())
         });
+        *state.updates.lock().unwrap() = None;
         let mut st = state.import.lock().unwrap();
         st.running = false;
+        st.finished = true;
         match res {
-            Ok(c) => {
-                *state.catalog.write().unwrap() = Some(Arc::new(c));
-                st.log.push("Ready".into());
-            }
+            Ok(()) => st.log.push("Ready".into()),
             Err(e) => st.error = Some(format!("{e:#}")),
         }
     });
     true
 }
 
+pub fn start_import(state: Arc<AppState>, file: Option<PathBuf>) -> bool {
+    start_job(state, "import", move |st, log| {
+        let db = st.data_dir.join("catalog.sqlite");
+        let src = match &file {
+            Some(p) => vndb_core::import::Source::File(p),
+            None => vndb_core::import::Source::Url(vndb_core::import::DUMP_URL),
+        };
+        vndb_core::import::import(src, &db, log)?;
+        Ok(true)
+    })
+}
+
+pub fn start_sync(state: Arc<AppState>) -> bool {
+    start_job(state, "sync", |st, log| {
+        let r = vndb_core::sync::apply(&st.data_dir.join("catalog.sqlite"), log)?;
+        Ok(r.new_vns + r.new_releases > 0)
+    })
+}
+
+pub fn start_sources_refresh(state: Arc<AppState>) -> bool {
+    start_job(state, "sources", |st, log| {
+        let defs = st.sources.read().unwrap().clone();
+        // separate connection: indexing must not block the UI's user database lock
+        let conn = vndb_core::db::open_user(&st.data_dir.join("user.sqlite"))?;
+        let res = vndb_core::sources::refresh_index(&defs, &conn, log)?;
+        for (id, n) in res {
+            log(&format!("{id}: {n} pages"));
+        }
+        Ok(false)
+    })
+}
+
+/// Refresh third-party indexes in the background when they are missing or older than a week.
+pub fn maybe_refresh_sources(state: Arc<AppState>) {
+    let stale = {
+        let defs = state.sources.read().unwrap();
+        let user = state.user.lock().unwrap();
+        vndb_core::sources::index_age_days(&defs, &user)
+            .map(|d| d > 7.0)
+            .unwrap_or(true)
+    };
+    if stale {
+        start_sources_refresh(state);
+    }
+}
+
 async fn import(State(s): St, body: Option<Json<ImportReq>>) -> Json<Value> {
     let file = body.and_then(|b| b.0.file).map(PathBuf::from);
     let started = start_import(s, file);
     Json(json!({ "started": started }))
+}
+
+#[derive(Deserialize)]
+struct UpdatesQ {
+    force: Option<bool>,
+}
+
+/// How far behind VNDB the local database is (needs internet; cached for 6 hours).
+async fn updates(State(s): St, Query(q): Query<UpdatesQ>) -> ApiResult<Value> {
+    if !s.ready() {
+        return Ok(Json(json!({ "ready": false })));
+    }
+    if !q.force.unwrap_or(false) {
+        if let Some((at, v)) = s.updates.lock().unwrap().clone() {
+            if at.elapsed() < std::time::Duration::from_secs(6 * 3600) {
+                return Ok(Json(v));
+            }
+        }
+    }
+    let db = s.data_dir.join("catalog.sqlite");
+    let check = blocking(move || {
+        Ok(vndb_core::sync::check(
+            &db,
+            &vndb_core::sync::Thresholds::default(),
+        )?)
+    })
+    .await?;
+    let v = json!({ "ready": true, "check": check });
+    *s.updates.lock().unwrap() = Some((std::time::Instant::now(), v.clone()));
+    Ok(Json(v))
+}
+
+async fn sync(State(s): St) -> Json<Value> {
+    Json(json!({ "started": start_sync(s) }))
+}
+
+async fn sources_info(State(s): St) -> ApiResult<Value> {
+    let defs = s.sources.read().unwrap().clone();
+    let u = s.user.lock().unwrap();
+    let mut st = u
+        .prepare("SELECT source, fetched_at, entries FROM source_meta")
+        .map_err(anyhow::Error::from)?;
+    let meta: HashMap<String, (String, i64)> = st
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                (r.get::<_, String>(1)?, r.get::<_, i64>(2)?),
+            ))
+        })
+        .map_err(anyhow::Error::from)?
+        .filter_map(Result::ok)
+        .collect();
+    let list: Vec<Value> = defs
+        .sources
+        .iter()
+        .map(|d| {
+            let m = meta.get(&d.id);
+            json!({ "id": d.id, "name": d.name, "lang": d.lang, "kind": d.kind, "adult": d.adult, "description": d.description,
+                    "indexed": d.index.is_some(), "fetched_at": m.map(|x| &x.0), "entries": m.map(|x| x.1) })
+        })
+        .collect();
+    Ok(Json(json!({ "sources": list })))
+}
+
+async fn sources_refresh(State(s): St) -> Json<Value> {
+    Json(json!({ "started": start_sources_refresh(s) }))
 }
 
 // ---------- tags ----------
@@ -488,6 +619,25 @@ async fn vn_detail(
         .ok();
     v["mark"] = json!(mark.as_ref().map(|m| &m.0));
     v["note"] = json!(mark.and_then(|m| m.1));
+    if let Some(vn) = s.cat()?.get(vid) {
+        let defs = s.sources.read().unwrap();
+        let order: Vec<String> = v["langs"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|l| l["lang"].as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        v["community"] = json!(vndb_core::sources::links_for(
+            &defs,
+            &u,
+            vn,
+            &d.aliases,
+            &order,
+            "community"
+        ));
+    }
     Ok(Json(v))
 }
 

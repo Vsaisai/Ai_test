@@ -458,6 +458,7 @@ export async function viewVn(root, id) {
         src.mtl ? h('span', { class: 'mini' }, 'машинный') : null,
         h('span', { class: 'price', 'data-url': src.url }),
         src.release ? h('div', { class: 'muted small' }, src.release, src.platforms.length ? ` · ${src.platforms.map(p => PLATFORMS[p] || p).join(', ')}` : '') : null)), 4))),
+    communityBlock(d),
     hasSteam ? h('div', { class: 'toolbar' }, h('button', { class: 'btn', onclick: async e => {
       e.target.disabled = true; priceOut.textContent = 'Узнаю цены…';
       try {
@@ -549,6 +550,21 @@ export async function viewVn(root, id) {
   );
 }
 
+function communityBlock(d) {
+  const list = (d.community || []).filter(l => settings().adult || !l.adult);
+  if (!list.length) return null;
+  const direct = list.filter(l => l.direct);
+  const search = list.filter(l => !l.direct);
+  return h('div', { class: 'where-group community' },
+    h('h3', {}, 'Каталоги переводов и сообщества'),
+    direct.map(l => h('div', { class: 'source' },
+      h('a', { href: l.url, target: '_blank', rel: 'noopener noreferrer' }, `${l.name} — страница новеллы`),
+      h('span', { class: 'langs' }, h('span', { class: 'lang' }, l.lang)),
+      l.adult ? h('span', { class: 'mini ero' }, '18+') : null)),
+    search.length ? h('div', { class: 'source' }, h('span', { class: 'muted small' }, 'Поискать: '),
+      search.map((l, i) => [i ? ' · ' : '', h('a', { href: l.url, target: '_blank', rel: 'noopener noreferrer' }, l.name)])) : null);
+}
+
 function collapsible(items, max) {
   if (items.length <= max) return items;
   const rest = h('div', { hidden: true }, items.slice(max));
@@ -599,6 +615,20 @@ export async function viewSettings(root) {
     return i;
   };
 
+  const srcBox = h('div', {}, spinner());
+  const loadSources = async () => {
+    try {
+      const r = await api.sources();
+      srcBox.replaceChildren(
+        h('p', { class: 'muted small' }, 'Ссылки на эти сайты появляются в блоке «Где взять». Для сайтов с индексом даётся прямая ссылка на страницу новеллы, для остальных — поиск. Список можно расширить файлом sources.json в папке данных.'),
+        h('ul', { class: 'src-list' }, r.sources.map(x => h('li', {},
+          h('b', {}, x.name), ` (${x.lang}${x.adult ? ', 18+' : ''}) `,
+          h('span', { class: 'muted small' }, x.kind === 'store_search' ? 'поиск по магазину, если на VNDB нет ссылок' : (x.description || '')),
+          x.indexed ? h('div', { class: 'muted small' }, x.entries ? `индекс: ${x.entries} страниц, обновлён ${x.fetched_at}` : 'индекс ещё не загружен') : null))),
+        h('button', { class: 'btn', onclick: async () => { await api.refreshSources(); toast('Обновляю индексы'); setTimeout(loadStatus, 800); } }, 'Обновить индексы'));
+    } catch (e) { srcBox.replaceChildren(errorBox(e, loadSources)); }
+  };
+  loadSources();
   const dbBox = h('div', {}, spinner());
   const loadStatus = async () => {
     try {
@@ -609,7 +639,7 @@ export async function viewSettings(root) {
       } }, st.ready ? 'Обновить базу из VNDB' : 'Скачать базу VNDB');
       dbBox.replaceChildren(
         h('p', {}, st.ready ? `В базе ${st.vns.toLocaleString('ru')} новелл и ${st.tags} тегов. Дамп VNDB от ${st.dump_timestamp}, импорт ${st.imported_at} (UTC).` : 'База не загружена.'),
-        btn, (st.import.log || []).length ? log : null);
+        btn, (st.import.log || []).length ? h('div', {}, h('div', { class: 'muted small' }, `Последняя задача: ${({ import: 'полная загрузка', sync: 'новые релизы', sources: 'индексы каталогов' })[st.import.kind] || st.import.kind}`), log) : null);
       if (st.import.running) setTimeout(loadStatus, 1500);
       else if (st.ready && (st.import.log || []).includes('Ready')) api.resetTags();
     } catch (e) { dbBox.replaceChildren(errorBox(e, loadStatus)); }
@@ -629,7 +659,15 @@ export async function viewSettings(root) {
       check('hideCancelled', 'Скрывать отменённые проекты')),
     h('section', { class: 'panel form' }, h('h2', {}, 'Вид'),
       field('Тема', select('theme', [['auto', 'Как в системе'], ['dark', 'Тёмная'], ['light', 'Светлая']]))),
-    h('section', { class: 'panel form' }, h('h2', {}, 'База данных'), dbBox),
+    h('section', { class: 'panel form' }, h('h2', {}, 'База данных и обновления'), dbBox,
+      field('Обновления', select('updatePolicy', [
+        ['smart', 'Новые релизы — сами, полную загрузку — спрашивать'],
+        ['auto', 'Всё автоматически (и полную загрузку тоже)'],
+        ['manual', 'Только вручную']])),
+      h('div', { class: 'toolbar' },
+        h('button', { class: 'btn', onclick: async () => { const m = await import('./app.js'); m.checkUpdates({ force: true, interactive: true }); } }, 'Проверить обновления'),
+        h('button', { class: 'btn', onclick: async () => { await api.sync(); toast('Подтягиваю новые релизы'); setTimeout(loadStatus, 800); } }, 'Подтянуть новые релизы'))),
+    h('section', { class: 'panel form' }, h('h2', {}, 'Каталоги переводов и сообщества'), srcBox),
     h('section', { class: 'panel form' }, h('h2', {}, 'Сервер'),
       field('Адрес сервера', text('apiBase', 'пусто = этот же сервер'), 'Нужно для мобильного приложения: например http://192.168.1.10:8080'),
       h('p', { class: 'muted small' }, 'Чтобы открыть с телефона: запустите на ПК «vndb-web serve --addr 0.0.0.0:8080» и откройте http://IP-компьютера:8080 в браузере телефона. ' +
