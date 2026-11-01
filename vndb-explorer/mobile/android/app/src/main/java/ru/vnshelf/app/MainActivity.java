@@ -91,6 +91,21 @@ public class MainActivity extends Activity {
 
     /** Methods callable from the page as window.VNShelfNative.* (only our own 127.0.0.1 page is ever loaded). */
     final class NativeBridge {
+        /** A long job runs in the server: show it in a notification (foreground service). */
+        @JavascriptInterface
+        public void watchJob() {
+            if (JobService.running) {
+                return;
+            }
+            runOnUiThread(() -> {
+                if (android.os.Build.VERSION.SDK_INT >= 33
+                        && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                    requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 1);
+                }
+                JobService.start(MainActivity.this, port);
+            });
+        }
+
         @JavascriptInterface
         public void keepAwake(boolean on) {
             runOnUiThread(() -> {
