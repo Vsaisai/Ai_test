@@ -47,7 +47,23 @@
   (`user.sqlite`), общие для ПК и телефона и не стираются при обновлении базы.
 * **PWA:** на телефоне можно «Установить приложение» / «На экран Домой».
 
-## Быстрый старт
+## Готовые сборки
+
+В [GitHub Releases](https://github.com/Vsaisai/Ai_test/releases):
+
+* **ПК** (`pc-v*`): zip для Windows x64, Linux x64 и macOS (Apple Silicon). Распаковать и запустить
+  `Start VN Shelf.bat` / `./start-vn-shelf.sh` / `Start VN Shelf.command` — поднимется сервер и
+  откроется окно приложения. Внутри две папки:
+  * `server/` — `vndb-web`, скрипты запуска (локально / для телефона в Wi-Fi), `data/` с базой и вашими полками;
+  * `client/` — `web/` (интерфейс, сервер берёт его отсюда), `open-client` (окно-приложение в Edge/Chrome),
+    `cli/vndb-explorer` (консольный клиент).
+* **Android** (`mobile-v*`): APK, см. [docs/MOBILE.md](docs/MOBILE.md).
+
+Сборки создаёт GitHub Actions: `.github/workflows/desktop.yml` — при пуше в `beta`, если для номера из
+`vndb-explorer/VERSION` ещё нет релиза. Локально: `cargo build --release -p vndb-web -p vndb-explorer`
+и `./desktop/package.sh linux-x64` (или `windows-x64`, `macos-arm64`).
+
+## Быстрый старт (из исходников)
 
 Нужен Rust (stable). Из папки `vndb-explorer`:
 
@@ -84,7 +100,7 @@ cargo build --release
 | `vndb-web import [--file dump.tar.zst]` | скачать дамп VNDB (или взять готовый файл) и пересобрать базу |
 | `vndb-web sync [--check]` | подтянуть новые новеллы и релизы через API VNDB (`--check` — только показать отставание) |
 | `vndb-web sources` | обновить индексы каталогов (vngames.ru) и показать, сколько страниц сопоставлено |
-| `vndb-web serve [--addr 127.0.0.1:8080] [--auto-import]` | запустить веб-интерфейс |
+| `vndb-web serve [--addr 127.0.0.1:8080] [--auto-import] [--web DIR]` | запустить веб-интерфейс (`--web` — брать интерфейс из папки, а не встроенный) |
 | `--data DIR` / `VNDB_DATA=DIR` | папка данных (по умолчанию `~/.local/share/vndb-explorer`, на Windows `%APPDATA%\vndb-explorer`) |
 
 В папке данных: `catalog.sqlite` (база VNDB), `user.sqlite` (ваши полки и индексы каталогов),
@@ -122,6 +138,7 @@ vndb-explorer/
 ├── crates/server   vndb-web: HTTP-сервер (axum) — REST API, кеш обложек, встроенный интерфейс
 ├── crates/cli      vndb-explorer: консольный клиент онлайн-API VNDB (из первой версии)
 ├── web/            интерфейс: HTML/CSS/ES-модули без сборки, PWA (manifest + service worker)
+├── desktop/        скрипты запуска и упаковщик ПК-версии (server/ + client/)
 └── docs/           документация (мобильное приложение)
 ```
 

@@ -1,0 +1,82 @@
+name: PC release
+
+# Every push to `beta` builds the PC packages (Windows / Linux / macOS zips with `server` and
+# `client` folders). If vndb-explorer/VERSION has no `pc-v<version>` release yet, one is created.
+on:
+  push:
+    branches: [beta]
+    paths:
+      - 'vndb-explorer/**'
+      - '.github/workflows/desktop.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows-x64
+          - os: ubuntu-latest
+            platform: linux-x64
+          - os: macos-latest
+            platform: macos-arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+        working-directory: vndb-explorer
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Tests
+        run: cargo test -p vndb-core -p vndb-web
+
+      - name: Build
+        run: cargo build --release -p vndb-web -p vndb-explorer
+
+      - name: Package
+        run: ./desktop/package.sh ${{ matrix.platform }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pc-${{ matrix.platform }}
+          path: vndb-explorer/target/dist/*.zip
+
+  release:
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release (new versions only)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="$(tr -d ' \r\n' < vndb-explorer/VERSION)"
+          TAG="pc-v$VERSION"
+          ls -la dist
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "Release $TAG already exists: bump vndb-explorer/VERSION to publish a new one."
+            exit 0
+          fi
+          gh release create "$TAG" dist/*.zip \
+            --target "$GITHUB_SHA" \
+            --title "VN Shelf $VERSION для ПК" \
+            --notes-file vndb-explorer/desktop/RELEASE_NOTES.md
