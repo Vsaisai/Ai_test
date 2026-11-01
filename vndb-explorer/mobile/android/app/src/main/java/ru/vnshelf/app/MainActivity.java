@@ -10,6 +10,8 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.Gravity;
+import android.view.WindowManager;
+import android.webkit.JavascriptInterface;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
@@ -53,6 +55,8 @@ public class MainActivity extends Activity {
         s.setDatabaseEnabled(true);
         s.setMediaPlaybackRequiresUserGesture(true);
         s.setUserAgentString(s.getUserAgentString() + " VNShelfApp/" + BuildConfigVersion.name(this));
+        // Lets the page keep the screen on during a database download/import.
+        web.addJavascriptInterface(new NativeBridge(), "VNShelfNative");
         web.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
@@ -83,6 +87,20 @@ public class MainActivity extends Activity {
                 web.loadUrl("http://127.0.0.1:" + p + "/");
             });
         }, "vnshelf-start").start();
+    }
+
+    /** Methods callable from the page as window.VNShelfNative.* (only our own 127.0.0.1 page is ever loaded). */
+    final class NativeBridge {
+        @JavascriptInterface
+        public void keepAwake(boolean on) {
+            runOnUiThread(() -> {
+                if (on) {
+                    getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                } else {
+                    getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                }
+            });
+        }
     }
 
     private void openExternal(Uri u) {
