@@ -23,6 +23,10 @@ let tagsPromise = null;
 export const api = {
   status: () => call('GET', '/api/status'),
   startImport: () => call('POST', '/api/import', {}),
+  updates: (force = false) => call('GET', `/api/updates${force ? '?force=1' : ''}`),
+  sync: () => call('POST', '/api/sync', {}),
+  sources: () => call('GET', '/api/sources'),
+  refreshSources: () => call('POST', '/api/sources/refresh', {}),
   tags() {
     if (!tagsPromise) {
       tagsPromise = call('GET', '/api/tags').then(d => {

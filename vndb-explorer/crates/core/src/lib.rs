@@ -13,10 +13,13 @@ pub mod copy;
 pub mod db;
 pub mod detail;
 pub mod extlinks;
+pub mod http;
 pub mod import;
 pub mod lang;
 pub mod search;
 pub mod shelves;
+pub mod sources;
+pub mod sync;
 pub mod tagtree;
 
 pub use catalog::Catalog;

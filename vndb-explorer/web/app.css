@@ -263,3 +263,13 @@ main { max-width: 1400px; margin: 0 auto; padding: 12px 16px 24px; }
 .releases { width: 100%; border-collapse: collapse; font-size: .88em; }
 .releases th, .releases td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
 details.panel > summary { cursor: pointer; font-weight: 600; }
+
+.update-banner {
+  max-width: 1400px; margin: 10px auto 0; padding: 10px 14px; display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center;
+  background: color-mix(in srgb, var(--accent) 14%, var(--panel)); border: 1px solid var(--accent); border-radius: var(--radius);
+}
+@media (max-width: 760px) { .update-banner { margin: 10px 16px 0; } }
+.update-banner > span { flex: 1 1 260px; }
+.where-group.community h3 { color: var(--accent); }
+.src-list { padding-left: 18px; margin: 6px 0 12px; }
+.src-list li { margin: 4px 0; }

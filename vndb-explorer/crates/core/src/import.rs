@@ -1,15 +1,16 @@
 //! Import the full VNDB database dump (`vndb-db-latest.tar.zst`) into a compact SQLite file.
 //!
-//! The archive is streamed (download -> zstd -> tar -> line parser), only the tables we need
-//! are kept, per-user tag votes are aggregated the same way VNDB does it, and the result is
-//! written into a fresh SQLite database which then atomically replaces the old one.
+//! Everything is streamed: download -> zstd -> tar -> line parser -> SQLite. Rows go straight
+//! into the database (raw helper tables are prefixed `tmp_`), and all aggregation (tag votes,
+//! per-VN languages, platforms, release dates ...) is done in SQL afterwards. Peak memory stays
+//! low enough for phones.
 
 use crate::copy::{split, Row};
 use crate::db;
 use crate::extlinks;
 use anyhow::{bail, Context, Result};
+use rusqlite::types::Value;
 use rusqlite::{params, Connection};
-use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 
@@ -30,69 +31,12 @@ pub struct Stats {
     pub dump_timestamp: String,
 }
 
-#[derive(Default)]
-struct TagVote {
-    vid: u32,
-    tag: u32,
-    uid: u32,
-    vote: i8,
-    spoiler: i8, // -1 = none
-    lie: i8,     // -1 = none, 0 false, 1 true
-}
-
-#[derive(Default)]
-struct Raw {
-    timestamp: String,
-    tags: Vec<Row>,
-    tags_parents: Vec<(u32, u32, bool)>,
-    tag_votes: Vec<TagVote>,
-    ignored_users: HashSet<u32>,
-    vn: Vec<Row>,
-    vn_titles: Vec<Row>,
-    vn_extlinks: Vec<(u32, u32)>,
-    vn_screenshots: Vec<(u32, String, Option<u32>)>,
-    vn_relations: Vec<(u32, u32, String, bool)>,
-    images: HashMap<String, (u16, u16)>,
-    releases: Vec<Row>,
-    releases_titles: Vec<Row>,
-    releases_vn: Vec<(u32, u32, String)>,
-    releases_platforms: Vec<(u32, String)>,
-    releases_extlinks: Vec<(u32, u32)>,
-    releases_producers: Vec<(u32, u32, bool, bool)>,
-    extlinks: HashMap<u32, (String, String)>,
-    producers: Vec<Row>,
-    producers_extlinks: Vec<(u32, u32)>,
-}
-
-fn lines<R: Read>(r: R, mut f: impl FnMut(Row)) -> Result<()> {
-    let mut br = BufReader::with_capacity(1 << 20, r);
-    let mut buf = String::new();
-    loop {
-        buf.clear();
-        if br.read_line(&mut buf)? == 0 {
-            break;
-        }
-        let line = buf.trim_end_matches(['\n', '\r']);
-        if !line.is_empty() {
-            f(Row(split(line)));
-        }
-    }
-    Ok(())
-}
-
-fn small(v: Option<i64>) -> i8 {
-    v.map(|x| x.clamp(-128, 127) as i8).unwrap_or(-1)
-}
-
 /// Run a full import. `progress` receives human-readable status lines.
 pub fn import(src: Source, db_path: &Path, progress: &dyn Fn(&str)) -> Result<Stats> {
     let reader: Box<dyn Read> = match src {
         Source::Url(u) => {
             progress(&format!("Downloading {u}"));
-            let resp = reqwest::blocking::Client::builder()
-                .user_agent(concat!("vndb-explorer/", env!("CARGO_PKG_VERSION")))
-                .timeout(None)
-                .build()?
+            let resp = crate::http::blocking_client(None)?
                 .get(u)
                 .send()
                 .context("download of the VNDB dump failed")?;
@@ -105,19 +49,23 @@ pub fn import(src: Source, db_path: &Path, progress: &dyn Fn(&str)) -> Result<St
             std::fs::File::open(p).with_context(|| format!("cannot open {}", p.display()))?,
         ),
     };
-    let raw = read_archive(reader, progress)?;
-    progress("Writing database");
-    let tmp = db_path.with_extension("importing");
-    let _ = std::fs::remove_file(&tmp);
     if let Some(d) = db_path.parent() {
         std::fs::create_dir_all(d)?;
     }
+    let tmp = db_path.with_extension("importing");
+    let _ = std::fs::remove_file(&tmp);
     let stats = {
         let mut conn = Connection::open(&tmp)?;
         db::create_schema(&conn)?;
-        let s = write(&mut conn, raw, progress)?;
+        conn.execute_batch(TMP_SCHEMA)?;
+        let tx = conn.transaction()?;
+        let ts = read_archive(reader, &tx, progress)?;
+        finish(&tx, &ts, progress)?;
+        let stats = stats(&tx, ts)?;
+        tx.commit()?;
+        progress("Compacting database");
         conn.execute_batch("PRAGMA optimize; VACUUM;")?;
-        s
+        stats
     };
     std::fs::rename(&tmp, db_path)?;
     progress(&format!(
@@ -127,497 +75,278 @@ pub fn import(src: Source, db_path: &Path, progress: &dyn Fn(&str)) -> Result<St
     Ok(stats)
 }
 
-fn read_archive(reader: Box<dyn Read>, progress: &dyn Fn(&str)) -> Result<Raw> {
+const TMP_SCHEMA: &str = "
+    CREATE TABLE tmp_tag_votes(tag INTEGER, vid INTEGER, uid INTEGER, vote INTEGER, spoiler INTEGER, lie INTEGER);
+    CREATE TABLE tmp_ignored(uid INTEGER PRIMARY KEY);
+    CREATE TABLE tmp_images(id TEXT PRIMARY KEY, sexual INTEGER, violence INTEGER);
+    CREATE TABLE tmp_extlinks(id INTEGER PRIMARY KEY, site TEXT, value TEXT);
+    CREATE TABLE tmp_links(kind TEXT, owner INTEGER, link INTEGER);
+";
+
+fn lines<R: Read>(r: R, mut f: impl FnMut(Row) -> Result<()>) -> Result<()> {
+    let mut br = BufReader::with_capacity(1 << 20, r);
+    let mut buf = String::new();
+    loop {
+        buf.clear();
+        if br.read_line(&mut buf)? == 0 {
+            break;
+        }
+        let line = buf.trim_end_matches(['\n', '\r']);
+        if !line.is_empty() {
+            f(Row(split(line)))?;
+        }
+    }
+    Ok(())
+}
+
+/// Stream one table into `sql`; `map` turns a dump row into statement parameters (None = skip).
+fn load<R: Read>(
+    r: R,
+    c: &Connection,
+    sql: &str,
+    map: impl Fn(&Row) -> Option<Vec<Value>>,
+) -> Result<()> {
+    let mut st = c.prepare(sql)?;
+    lines(r, |row| {
+        if let Some(vals) = map(&row) {
+            st.execute(rusqlite::params_from_iter(vals))?;
+        }
+        Ok(())
+    })
+}
+
+fn int(v: Option<i64>) -> Value {
+    v.map(Value::Integer).unwrap_or(Value::Null)
+}
+fn text(v: Option<&str>) -> Value {
+    v.map(|s| Value::Text(s.to_string())).unwrap_or(Value::Null)
+}
+fn s(v: &str) -> Value {
+    Value::Text(v.to_string())
+}
+fn b(v: bool) -> Value {
+    Value::Integer(v as i64)
+}
+fn id(r: &Row, i: usize) -> Option<Value> {
+    r.id(i).map(|x| Value::Integer(x as i64))
+}
+
+fn link(kind: &'static str) -> impl Fn(&Row) -> Option<Vec<Value>> {
+    move |r: &Row| Some(vec![s(kind), id(r, 0)?, int(r.i(1))])
+}
+
+fn read_archive(reader: Box<dyn Read>, c: &Connection, progress: &dyn Fn(&str)) -> Result<String> {
     let dec = zstd::stream::read::Decoder::new(reader)?;
     let mut ar = tar::Archive::new(dec);
-    let mut raw = Raw::default();
+    let mut timestamp = String::new();
+    let mut seen_vn = false;
     for entry in ar.entries()? {
         let mut e = entry?;
         let name = e.path()?.to_string_lossy().to_string();
         let table = name.strip_prefix("db/").unwrap_or(&name).to_string();
-        let r = &mut raw;
         match table.as_str() {
             "TIMESTAMP" => {
-                let mut s = String::new();
-                e.read_to_string(&mut s)?;
-                r.timestamp = s.trim().to_string();
+                e.read_to_string(&mut timestamp)?;
+                timestamp = timestamp.trim().to_string();
             }
-            "tags" => lines(&mut e, |row| r.tags.push(row))?,
-            "tags_parents" => lines(&mut e, |x| {
-                if let (Some(a), Some(b)) = (x.id(0), x.id(1)) {
-                    r.tags_parents.push((a, b, x.b(2)))
-                }
+            "tags" => load(
+                &mut e,
+                c,
+                "INSERT INTO tags(id, cat, defaultspoil, searchable, applicable, name, aliases, description) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                |r| Some(vec![id(r, 0)?, s(&r.string(1)), int(r.i(2).or(Some(0))), b(r.b(3)), b(r.b(4)), s(&r.string(5)), s(&r.string(6)), s(&r.string(7))]),
+            )?,
+            "tags_parents" => load(&mut e, c, "INSERT INTO tag_parents(id, parent, main) VALUES (?1,?2,?3)", |r| {
+                Some(vec![id(r, 0)?, id(r, 1)?, b(r.b(2))])
             })?,
             "tags_vn" => {
                 progress("Reading tag votes");
                 // date tag vid uid vote spoiler ignore lie notes
-                lines(&mut e, |x| {
-                    if x.b(6) {
-                        return;
+                load(&mut e, c, "INSERT INTO tmp_tag_votes VALUES (?1,?2,?3,?4,?5,?6)", |r| {
+                    if r.b(6) {
+                        return None;
                     }
-                    if let (Some(tag), Some(vid)) = (x.id(1), x.id(2)) {
-                        r.tag_votes.push(TagVote {
-                            vid,
-                            tag,
-                            uid: x.id(3).unwrap_or(0),
-                            vote: small(x.i(4)),
-                            spoiler: small(x.i(5)),
-                            lie: x.ob(7).map(|b| b as i8).unwrap_or(-1),
-                        })
-                    }
+                    Some(vec![id(r, 1)?, id(r, 2)?, int(r.id(3).map(i64::from)), int(r.i(4)), int(r.i(5)), int(r.ob(7).map(i64::from))])
                 })?
             }
-            "users" => lines(&mut e, |x| {
-                // id ign_votes ...
-                if x.b(1) {
-                    if let Some(id) = x.id(0) {
-                        r.ignored_users.insert(id);
-                    }
+            "users" => load(&mut e, c, "INSERT OR IGNORE INTO tmp_ignored VALUES (?1)", |r| if r.b(1) { Some(vec![id(r, 0)?]) } else { None })?,
+            "images" => load(&mut e, c, "INSERT OR REPLACE INTO tmp_images VALUES (?1,?2,?3)", |r| {
+                let i = r.string(0);
+                if !(i.starts_with("cv") || i.starts_with("sf")) {
+                    return None;
                 }
+                let sex = r.f(4).unwrap_or(0.0).round().clamp(0.0, 200.0) as i64;
+                let vio = r.f(6).unwrap_or(0.0).round().clamp(0.0, 200.0) as i64;
+                Some(vec![s(&i), Value::Integer(sex), Value::Integer(vio)])
             })?,
-            "vn" => {
-                progress("Reading visual novels");
-                lines(&mut e, |row| r.vn.push(row))?
-            }
-            "vn_titles" => lines(&mut e, |row| r.vn_titles.push(row))?,
-            "vn_extlinks" => lines(&mut e, |x| {
-                if let (Some(a), Some(b)) = (x.id(0), x.i(1)) {
-                    r.vn_extlinks.push((a, b as u32))
-                }
+            "extlinks" => load(&mut e, c, "INSERT OR REPLACE INTO tmp_extlinks VALUES (?1,?2,?3)", |r| {
+                Some(vec![int(r.i(0)), s(&r.string(1)), s(&r.string(2))])
             })?,
-            "vn_screenshots" => lines(&mut e, |x| {
-                if let Some(v) = x.id(0) {
-                    r.vn_screenshots.push((v, x.string(1), x.id(2)))
-                }
-            })?,
-            "vn_relations" => lines(&mut e, |x| {
-                if let (Some(a), Some(b)) = (x.id(0), x.id(1)) {
-                    r.vn_relations.push((a, b, x.string(2), x.b(3)))
-                }
-            })?,
-            "images" => lines(&mut e, |x| {
-                let id = x.string(0);
-                if id.starts_with("cv") || id.starts_with("sf") {
-                    let sex = x.f(4).unwrap_or(0.0).round().clamp(0.0, 200.0) as u16;
-                    let vio = x.f(6).unwrap_or(0.0).round().clamp(0.0, 200.0) as u16;
-                    r.images.insert(id, (sex, vio));
-                }
+            "releases_extlinks" => load(&mut e, c, "INSERT INTO tmp_links VALUES (?1,?2,?3)", link("r"))?,
+            "producers_extlinks" => load(&mut e, c, "INSERT INTO tmp_links VALUES (?1,?2,?3)", link("p"))?,
+            "vn_extlinks" => load(&mut e, c, "INSERT INTO tmp_links VALUES (?1,?2,?3)", link("v"))?,
+            "producers" => load(&mut e, c, "INSERT INTO producers(id, type, lang, name, latin) VALUES (?1,?2,?3,?4,?5)", |r| {
+                Some(vec![id(r, 0)?, s(&r.string(1)), s(&r.string(2)), s(&r.string(3)), text(r.opt(4).as_deref())])
             })?,
             "releases" => {
                 progress("Reading releases");
-                lines(&mut e, |row| r.releases.push(row))?
+                // id gtin olang released voiced reso_x reso_y minage ... has_ero(17) patch(18) freeware(19) uncensored(20) official(21) catalog notes engine(24)
+                load(
+                    &mut e,
+                    c,
+                    "INSERT INTO releases(id, olang, released, minage, has_ero, patch, freeware, uncensored, official, engine) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                    |r| {
+                        Some(vec![
+                            id(r, 0)?,
+                            s(&r.string(2)),
+                            int(r.i(3).or(Some(0))),
+                            int(r.i(7).or(Some(-1))),
+                            b(r.b(17)),
+                            b(r.b(18)),
+                            b(r.b(19)),
+                            b(r.b(20)),
+                            b(r.b(21)),
+                            text(r.opt(24).as_deref()),
+                        ])
+                    },
+                )?
             }
-            "releases_titles" => lines(&mut e, |row| r.releases_titles.push(row))?,
-            "releases_vn" => lines(&mut e, |x| {
-                if let (Some(a), Some(b)) = (x.id(0), x.id(1)) {
-                    r.releases_vn.push((a, b, x.string(2)))
-                }
+            "releases_titles" => load(&mut e, c, "INSERT INTO release_titles(rid, lang, mtl, title, latin) VALUES (?1,?2,?3,?4,?5)", |r| {
+                Some(vec![id(r, 0)?, s(&r.string(1)), b(r.b(2)), text(r.opt(3).as_deref()), text(r.opt(4).as_deref())])
             })?,
-            "releases_platforms" => lines(&mut e, |x| {
-                if let Some(a) = x.id(0) {
-                    r.releases_platforms.push((a, x.string(1)))
-                }
+            "releases_vn" => load(&mut e, c, "INSERT INTO release_vn(rid, vid, rtype) VALUES (?1,?2,?3)", |r| {
+                Some(vec![id(r, 0)?, id(r, 1)?, s(&r.string(2))])
             })?,
-            "releases_extlinks" => lines(&mut e, |x| {
-                if let (Some(a), Some(b)) = (x.id(0), x.i(1)) {
-                    r.releases_extlinks.push((a, b as u32))
-                }
+            "releases_platforms" => load(&mut e, c, "INSERT INTO release_platforms(rid, platform) VALUES (?1,?2)", |r| {
+                Some(vec![id(r, 0)?, s(&r.string(1))])
             })?,
-            "releases_producers" => lines(&mut e, |x| {
-                if let (Some(a), Some(b)) = (x.id(0), x.id(1)) {
-                    r.releases_producers.push((a, b, x.b(2), x.b(3)))
-                }
+            "releases_producers" => load(&mut e, c, "INSERT INTO release_producers(rid, pid, developer, publisher) VALUES (?1,?2,?3,?4)", |r| {
+                Some(vec![id(r, 0)?, id(r, 1)?, b(r.b(2)), b(r.b(3))])
             })?,
-            "extlinks" => lines(&mut e, |x| {
-                if let Some(id) = x.i(0) {
-                    r.extlinks.insert(id as u32, (x.string(1), x.string(2)));
-                }
+            "vn" => {
+                progress("Reading visual novels");
+                seen_vn = true;
+                // id image c_image olang c_votecount c_rating c_average c_length c_lengthnum length devstatus alias description
+                load(
+                    &mut e,
+                    c,
+                    "INSERT INTO vn(id, olang, image, img_sexual, img_violence, votecount, rating, average, length_minutes, length_votes, length_cat,
+                                    devstatus, aliases, description, released, has_ero, minage, freeware, platforms, developers)
+                     VALUES (?1,?2,?3,0,0,?4,?5,?6,?7,?8,?9,?10,?11,?12,0,0,-1,0,'','')",
+                    |r| {
+                        Some(vec![
+                            id(r, 0)?,
+                            s(&r.string(3)),
+                            text(r.opt(2).or_else(|| r.opt(1)).as_deref()),
+                            int(r.i(4).or(Some(0))),
+                            r.i(5).map(|x| Value::Real(x as f64 / 100.0)).unwrap_or(Value::Null),
+                            r.i(6).map(|x| Value::Real(x as f64 / 100.0)).unwrap_or(Value::Null),
+                            int(r.i(7)),
+                            int(r.i(8).or(Some(0))),
+                            int(r.i(9).or(Some(0))),
+                            int(r.i(10).or(Some(0))),
+                            s(&r.string(11)),
+                            s(&r.string(12)),
+                        ])
+                    },
+                )?
+            }
+            "vn_titles" => load(&mut e, c, "INSERT INTO vn_titles(vid, lang, official, title, latin) VALUES (?1,?2,?3,?4,?5)", |r| {
+                Some(vec![id(r, 0)?, s(&r.string(1)), b(r.b(2)), s(&r.string(3)), text(r.opt(4).as_deref())])
             })?,
-            "producers" => lines(&mut e, |row| r.producers.push(row))?,
-            "producers_extlinks" => lines(&mut e, |x| {
-                if let (Some(a), Some(b)) = (x.id(0), x.i(1)) {
-                    r.producers_extlinks.push((a, b as u32))
-                }
+            "vn_screenshots" => load(&mut e, c, "INSERT INTO vn_screenshots(vid, scr, rid, sexual, violence) VALUES (?1,?2,?3,0,0)", |r| {
+                Some(vec![id(r, 0)?, s(&r.string(1)), int(r.id(2).map(i64::from))])
             })?,
-            _ => {} // skipped (streamed past)
+            "vn_relations" => load(&mut e, c, "INSERT INTO vn_relations(vid, other, relation, official) VALUES (?1,?2,?3,?4)", |r| {
+                Some(vec![id(r, 0)?, id(r, 1)?, s(&r.string(2)), b(r.b(3))])
+            })?,
+            _ => {} // not needed: streamed past
         }
     }
-    if raw.vn.is_empty() || raw.tags.is_empty() {
+    if !seen_vn {
         bail!("the archive does not look like a VNDB database dump");
     }
-    Ok(raw)
+    Ok(timestamp)
 }
 
-/// "20031017" -> 20031017; 0 = unknown; 99999999 = TBA
-fn date(s: Option<i64>) -> i64 {
-    s.unwrap_or(0)
-}
-
-fn write(conn: &mut Connection, raw: Raw, progress: &dyn Fn(&str)) -> Result<Stats> {
-    let tx = conn.transaction()?;
-    let mut stats = Stats {
-        dump_timestamp: raw.timestamp.clone(),
-        ..Default::default()
-    };
-    tx.execute(
-        "INSERT INTO meta(key, value) VALUES ('dump_timestamp', ?1)",
-        [&raw.timestamp],
+fn finish(c: &Connection, timestamp: &str, progress: &dyn Fn(&str)) -> Result<()> {
+    c.execute(
+        "INSERT OR REPLACE INTO meta(key, value) VALUES ('dump_timestamp', ?1)",
+        [timestamp],
     )?;
-    tx.execute(
-        "INSERT INTO meta(key, value) VALUES ('imported_at', datetime('now'))",
+    c.execute(
+        "INSERT OR REPLACE INTO meta(key, value) VALUES ('imported_at', datetime('now'))",
+        [],
+    )?;
+    c.execute(
+        "INSERT OR REPLACE INTO meta(key, value) VALUES ('synced_at', datetime('now'))",
         [],
     )?;
 
-    // ---- tags ----
-    let mut defaultspoil: HashMap<u32, i64> = HashMap::new();
-    {
-        let mut st = tx.prepare(
-            "INSERT INTO tags(id, cat, defaultspoil, searchable, applicable, name, aliases, description) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-        )?;
-        for t in &raw.tags {
-            let Some(id) = t.id(0) else { continue };
-            defaultspoil.insert(id, t.i(2).unwrap_or(0));
-            st.execute(params![
-                id,
-                t.string(1),
-                t.i(2).unwrap_or(0),
-                t.b(3),
-                t.b(4),
-                t.string(5),
-                t.string(6),
-                t.string(7)
-            ])?;
-            stats.tags += 1;
-        }
-        let mut st = tx.prepare("INSERT INTO tag_parents(id, parent, main) VALUES (?1,?2,?3)")?;
-        for (a, b, m) in &raw.tags_parents {
-            st.execute(params![a, b, m])?;
-        }
-    }
-
-    // ---- tag votes -> aggregated VN tags ----
     progress("Aggregating tag votes");
-    #[derive(Default)]
-    struct Agg {
-        sum: i64,
-        n: i64,
-        sp_sum: i64,
-        sp_n: i64,
-        lie_t: i64,
-        lie_f: i64,
-    }
-    let mut agg: HashMap<(u32, u32), Agg> = HashMap::new();
-    for v in &raw.tag_votes {
-        if raw.ignored_users.contains(&v.uid) {
-            continue;
-        }
-        let a = agg.entry((v.vid, v.tag)).or_default();
-        a.sum += v.vote as i64;
-        a.n += 1;
-        if v.spoiler >= 0 {
-            a.sp_sum += v.spoiler as i64;
-            a.sp_n += 1;
-        }
-        match v.lie {
-            1 => a.lie_t += 1,
-            0 => a.lie_f += 1,
-            _ => {}
-        }
-    }
+    c.execute_batch(
+        "INSERT INTO vn_tags(vid, tag, rating, spoiler, lie)
+         SELECT tv.vid, tv.tag, ROUND(AVG(tv.vote), 2),
+                CASE WHEN COUNT(tv.spoiler) = 0 THEN COALESCE((SELECT defaultspoil FROM tags t WHERE t.id = tv.tag), 0)
+                     WHEN AVG(tv.spoiler) > 1.3 THEN 2 WHEN AVG(tv.spoiler) > 0.4 THEN 1 ELSE 0 END,
+                COALESCE(SUM(tv.lie = 1), 0) > 0 AND COALESCE(SUM(tv.lie = 1), 0) >= COALESCE(SUM(tv.lie = 0), 0)
+         FROM tmp_tag_votes tv
+         WHERE tv.uid IS NULL OR tv.uid NOT IN (SELECT uid FROM tmp_ignored)
+         GROUP BY tv.vid, tv.tag
+         HAVING AVG(tv.vote) > 0;",
+    )?;
+
+    progress("Resolving links and images");
     {
-        let mut st = tx.prepare(
-            "INSERT INTO vn_tags(vid, tag, rating, spoiler, lie) VALUES (?1,?2,?3,?4,?5)",
-        )?;
-        for ((vid, tag), a) in &agg {
-            if a.n == 0 {
+        let mut ins_r = c.prepare("INSERT INTO release_links(rid, site, url) VALUES (?1,?2,?3)")?;
+        let mut ins_v = c.prepare("INSERT INTO vn_links(vid, site, url) VALUES (?1,?2,?3)")?;
+        let mut upd_p =
+            c.prepare("UPDATE producers SET website = ?2 WHERE id = ?1 AND website IS NULL")?;
+        let mut st = c.prepare("SELECT l.kind, l.owner, e.site, e.value FROM tmp_links l JOIN tmp_extlinks e ON e.id = l.link")?;
+        let mut rows = st.query([])?;
+        while let Some(r) = rows.next()? {
+            let kind: String = r.get(0)?;
+            let owner: i64 = r.get(1)?;
+            let site: String = r.get(2)?;
+            let value: String = r.get(3)?;
+            let Some(url) = extlinks::url(&site, &value) else {
                 continue;
-            }
-            let rating = a.sum as f64 / a.n as f64;
-            if rating <= 0.0 {
-                continue;
-            }
-            let spoiler = if a.sp_n == 0 {
-                *defaultspoil.get(tag).unwrap_or(&0)
-            } else {
-                let avg = a.sp_sum as f64 / a.sp_n as f64;
-                if avg > 1.3 {
-                    2
-                } else if avg > 0.4 {
-                    1
-                } else {
-                    0
-                }
             };
-            let lie = a.lie_t > 0 && a.lie_t >= a.lie_f;
-            st.execute(params![
-                vid,
-                tag,
-                (rating * 100.0).round() / 100.0,
-                spoiler,
-                lie
-            ])?;
-            stats.tag_links += 1;
-        }
-    }
-
-    // ---- extlinks helper ----
-    let link = |id: &u32| -> Option<(String, String)> {
-        let (site, value) = raw.extlinks.get(id)?;
-        Some((site.clone(), extlinks::url(site, value)?))
-    };
-
-    // ---- producers ----
-    {
-        let mut website: HashMap<u32, String> = HashMap::new();
-        for (pid, l) in &raw.producers_extlinks {
-            if let Some((site, url)) = link(l) {
-                if site == "website" {
-                    website.entry(*pid).or_insert(url);
+            match kind.as_str() {
+                "r" => {
+                    ins_r.execute(params![owner, site, url])?;
                 }
-            }
-        }
-        let mut st = tx.prepare("INSERT INTO producers(id, type, lang, name, latin, website) VALUES (?1,?2,?3,?4,?5,?6)")?;
-        for p in &raw.producers {
-            let Some(id) = p.id(0) else { continue };
-            st.execute(params![
-                id,
-                p.string(1),
-                p.string(2),
-                p.string(3),
-                p.opt(4),
-                website.get(&id)
-            ])?;
-            stats.producers += 1;
-        }
-    }
-
-    // ---- releases ----
-    progress("Writing releases");
-    let mut rel_info: HashMap<u32, (i64, bool, bool, bool, bool, i64)> = HashMap::new(); // released, official, patch, freeware, has_ero, minage
-    {
-        // releases: id gtin olang released voiced reso_x reso_y minage ani_story ani_ero ... has_ero(17) patch(18) freeware(19) uncensored(20) official(21) catalog notes engine
-        let mut st = tx.prepare(
-            "INSERT INTO releases(id, olang, released, minage, has_ero, patch, freeware, uncensored, official, engine) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-        )?;
-        for r in &raw.releases {
-            let Some(id) = r.id(0) else { continue };
-            let released = date(r.i(3));
-            let minage = r.i(7).unwrap_or(-1);
-            rel_info.insert(id, (released, r.b(21), r.b(18), r.b(19), r.b(17), minage));
-            st.execute(params![
-                id,
-                r.string(2),
-                released,
-                minage,
-                r.b(17),
-                r.b(18),
-                r.b(19),
-                r.b(20),
-                r.b(21),
-                r.opt(24)
-            ])?;
-            stats.releases += 1;
-        }
-        let mut st = tx.prepare(
-            "INSERT INTO release_titles(rid, lang, mtl, title, latin) VALUES (?1,?2,?3,?4,?5)",
-        )?;
-        for t in &raw.releases_titles {
-            let Some(id) = t.id(0) else { continue };
-            st.execute(params![id, t.string(1), t.b(2), t.opt(3), t.opt(4)])?;
-        }
-        let mut st = tx.prepare("INSERT INTO release_vn(rid, vid, rtype) VALUES (?1,?2,?3)")?;
-        for (r, v, t) in &raw.releases_vn {
-            st.execute(params![r, v, t])?;
-        }
-        let mut st = tx.prepare("INSERT INTO release_platforms(rid, platform) VALUES (?1,?2)")?;
-        for (r, p) in &raw.releases_platforms {
-            st.execute(params![r, p])?;
-        }
-        let mut st = tx.prepare("INSERT INTO release_links(rid, site, url) VALUES (?1,?2,?3)")?;
-        for (r, l) in &raw.releases_extlinks {
-            if let Some((site, url)) = link(l) {
-                st.execute(params![r, site, url])?;
-            }
-        }
-        let mut st = tx.prepare(
-            "INSERT INTO release_producers(rid, pid, developer, publisher) VALUES (?1,?2,?3,?4)",
-        )?;
-        for (r, p, d, pb) in &raw.releases_producers {
-            st.execute(params![r, p, d, pb])?;
-        }
-    }
-
-    // ---- per-VN derived data from releases ----
-    // languages: lang -> best availability (0 original/official, 1 fan, 2 mtl only)
-    let mut rel_langs: HashMap<u32, Vec<(String, bool)>> = HashMap::new();
-    for t in &raw.releases_titles {
-        if let Some(id) = t.id(0) {
-            rel_langs.entry(id).or_default().push((t.string(1), t.b(2)));
-        }
-    }
-    let mut rel_plat: HashMap<u32, Vec<String>> = HashMap::new();
-    for (r, p) in &raw.releases_platforms {
-        rel_plat.entry(*r).or_default().push(p.clone());
-    }
-    struct VnDerived {
-        langs: HashMap<String, u8>,
-        platforms: HashSet<String>,
-        released: i64,
-        has_ero: bool,
-        minage: i64,
-        freeware: bool,
-        developers: Vec<u32>,
-    }
-    let mut derived: HashMap<u32, VnDerived> = HashMap::new();
-    let mut rel_devs: HashMap<u32, Vec<u32>> = HashMap::new();
-    for (r, p, dev, _) in &raw.releases_producers {
-        if *dev {
-            rel_devs.entry(*r).or_default().push(*p);
-        }
-    }
-    for (rid, vid, rtype) in &raw.releases_vn {
-        let Some(&(released, official, patch, freeware, has_ero, minage)) = rel_info.get(rid)
-        else {
-            continue;
-        };
-        let d = derived.entry(*vid).or_insert_with(|| VnDerived {
-            langs: HashMap::new(),
-            platforms: HashSet::new(),
-            released: 0,
-            has_ero: false,
-            minage: -1,
-            freeware: false,
-            developers: vec![],
-        });
-        for (lang, mtl) in rel_langs.get(rid).map(|v| v.as_slice()).unwrap_or(&[]) {
-            let kind = if *mtl {
-                2
-            } else if official {
-                0
-            } else {
-                1
-            };
-            let e = d.langs.entry(lang.clone()).or_insert(kind);
-            *e = (*e).min(kind);
-        }
-        if !patch {
-            for p in rel_plat.get(rid).map(|v| v.as_slice()).unwrap_or(&[]) {
-                d.platforms.insert(p.clone());
-            }
-        }
-        if released > 0
-            && released < 99999999
-            && (d.released == 0 || released < d.released)
-            && rtype != "trial"
-        {
-            d.released = released;
-        }
-        d.has_ero |= has_ero;
-        d.minage = d.minage.max(minage);
-        d.freeware |= freeware && official && !patch && rtype == "complete";
-        if official {
-            for p in rel_devs.get(rid).map(|v| v.as_slice()).unwrap_or(&[]) {
-                if !d.developers.contains(p) {
-                    d.developers.push(*p);
+                "v" => {
+                    ins_v.execute(params![owner, site, url])?;
                 }
-            }
-        }
-    }
-
-    // ---- VNs ----
-    progress("Writing visual novels");
-    {
-        // vn: id image c_image olang c_votecount c_rating c_average c_length c_lengthnum length devstatus alias description
-        let mut st = tx.prepare(
-            "INSERT INTO vn(id, olang, image, img_sexual, img_violence, votecount, rating, average, length_minutes, length_votes, length_cat,
-                            devstatus, aliases, description, released, has_ero, minage, freeware, platforms, developers)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
-        )?;
-        let mut sl = tx.prepare("INSERT INTO vn_langs(vid, lang, kind) VALUES (?1,?2,?3)")?;
-        for v in &raw.vn {
-            let Some(id) = v.id(0) else { continue };
-            let image = v.opt(2).or_else(|| v.opt(1));
-            let (sex, vio) = image
-                .as_ref()
-                .and_then(|i| raw.images.get(i).copied())
-                .unwrap_or((0, 0));
-            let d = derived.get(&id);
-            let mut plats: Vec<&String> =
-                d.map(|d| d.platforms.iter().collect()).unwrap_or_default();
-            plats.sort();
-            let devs = d
-                .map(|d| {
-                    d.developers
-                        .iter()
-                        .map(|p| p.to_string())
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                })
-                .unwrap_or_default();
-            st.execute(params![
-                id,
-                v.string(3),
-                image,
-                sex,
-                vio,
-                v.i(4).unwrap_or(0),
-                v.i(5).map(|r| r as f64 / 100.0),
-                v.i(6).map(|r| r as f64 / 100.0),
-                v.i(7),
-                v.i(8).unwrap_or(0),
-                v.i(9).unwrap_or(0),
-                v.i(10).unwrap_or(0),
-                v.string(11),
-                v.string(12),
-                d.map(|d| d.released).unwrap_or(0),
-                d.map(|d| d.has_ero).unwrap_or(false),
-                d.map(|d| d.minage).unwrap_or(-1),
-                d.map(|d| d.freeware).unwrap_or(false),
-                plats
-                    .iter()
-                    .map(|s| s.as_str())
-                    .collect::<Vec<_>>()
-                    .join(" "),
-                devs,
-            ])?;
-            let mut langs: HashMap<String, u8> = d.map(|d| d.langs.clone()).unwrap_or_default();
-            langs.entry(v.string(3)).or_insert(0);
-            for (l, k) in langs {
-                if !l.is_empty() {
-                    sl.execute(params![id, l, k])?;
+                "p" if site == "website" => {
+                    upd_p.execute(params![owner, url])?;
                 }
+                _ => {}
             }
-            stats.vns += 1;
-        }
-        let mut st = tx.prepare(
-            "INSERT INTO vn_titles(vid, lang, official, title, latin) VALUES (?1,?2,?3,?4,?5)",
-        )?;
-        for t in &raw.vn_titles {
-            let Some(id) = t.id(0) else { continue };
-            st.execute(params![id, t.string(1), t.b(2), t.string(3), t.opt(4)])?;
-        }
-        let mut st = tx.prepare("INSERT INTO vn_links(vid, site, url) VALUES (?1,?2,?3)")?;
-        for (v, l) in &raw.vn_extlinks {
-            if let Some((site, url)) = link(l) {
-                st.execute(params![v, site, url])?;
-            }
-        }
-        let mut st = tx.prepare(
-            "INSERT INTO vn_screenshots(vid, scr, rid, sexual, violence) VALUES (?1,?2,?3,?4,?5)",
-        )?;
-        for (v, scr, rid) in &raw.vn_screenshots {
-            let (s, vi) = raw.images.get(scr).copied().unwrap_or((0, 0));
-            st.execute(params![v, scr, rid, s, vi])?;
-        }
-        let mut st = tx.prepare(
-            "INSERT INTO vn_relations(vid, other, relation, official) VALUES (?1,?2,?3,?4)",
-        )?;
-        for (a, b, rel, off) in &raw.vn_relations {
-            st.execute(params![a, b, rel, off])?;
         }
     }
+    c.execute_batch(
+        "UPDATE vn SET img_sexual = i.sexual, img_violence = i.violence FROM tmp_images i WHERE i.id = vn.image;
+         UPDATE vn_screenshots SET sexual = i.sexual, violence = i.violence FROM tmp_images i WHERE i.id = vn_screenshots.scr;
+         DROP TABLE tmp_tag_votes; DROP TABLE tmp_ignored; DROP TABLE tmp_images; DROP TABLE tmp_extlinks; DROP TABLE tmp_links;",
+    )?;
+
     progress("Building indexes");
-    db::create_indexes(&tx)?;
-    tx.commit()?;
-    Ok(stats)
+    db::create_indexes(c)?;
+    progress("Computing languages, platforms and dates");
+    db::recompute_derived(c, None)?;
+    Ok(())
+}
+
+fn stats(c: &Connection, ts: String) -> Result<Stats> {
+    let n =
+        |sql: &str| -> Result<usize> { Ok(c.query_row(sql, [], |r| r.get::<_, i64>(0))? as usize) };
+    Ok(Stats {
+        vns: n("SELECT COUNT(*) FROM vn")?,
+        releases: n("SELECT COUNT(*) FROM releases")?,
+        tags: n("SELECT COUNT(*) FROM tags")?,
+        tag_links: n("SELECT COUNT(*) FROM vn_tags")?,
+        producers: n("SELECT COUNT(*) FROM producers")?,
+        dump_timestamp: ts,
+    })
 }

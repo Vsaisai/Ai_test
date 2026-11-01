@@ -52,13 +52,75 @@ pub fn create_indexes(c: &Connection) -> Result<()> {
         CREATE INDEX release_platforms_rid ON release_platforms(rid);
         CREATE INDEX release_links_rid ON release_links(rid);
         CREATE INDEX release_producers_rid ON release_producers(rid);
+        CREATE INDEX vn_langs_vid_lang ON vn_langs(vid, lang);
+        CREATE INDEX vn_tags_vid_tag ON vn_tags(vid, tag);
         ",
     )?;
     Ok(())
 }
 
+/// Recompute per-VN fields that come from releases (languages, platforms, first release date,
+/// 18+, freeware, developers). `only` limits the work to some VNs (used by incremental sync).
+pub fn recompute_derived(c: &Connection, only: Option<&[u32]>) -> Result<()> {
+    let (w_vn, w_rv) = match only {
+        Some([]) => return Ok(()),
+        Some(ids) => {
+            let list = ids
+                .iter()
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            (
+                format!("WHERE vn.id IN ({list})"),
+                format!("AND rv.vid IN ({list})"),
+            )
+        }
+        None => (String::new(), String::new()),
+    };
+    let langs_scope = match only {
+        Some(_) => w_vn.replace("vn.id", "vid"),
+        None => String::new(),
+    };
+    c.execute_batch(&format!(
+        "
+        DELETE FROM vn_langs {langs_scope};
+        INSERT INTO vn_langs(vid, lang, kind)
+          SELECT rv.vid, rt.lang, MIN(CASE WHEN rt.mtl THEN 2 WHEN r.official THEN 0 ELSE 1 END)
+          FROM release_vn rv JOIN releases r ON r.id = rv.rid JOIN release_titles rt ON rt.rid = r.id
+          WHERE rt.lang <> '' {w_rv}
+          GROUP BY rv.vid, rt.lang;
+        UPDATE vn_langs SET kind = 0 WHERE EXISTS (SELECT 1 FROM vn WHERE vn.id = vn_langs.vid AND vn.olang = vn_langs.lang);
+        INSERT INTO vn_langs(vid, lang, kind)
+          SELECT vn.id, vn.olang, 0 FROM vn {w_vn_and} vn.olang <> ''
+            AND NOT EXISTS (SELECT 1 FROM vn_langs l WHERE l.vid = vn.id AND l.lang = vn.olang);
+        UPDATE vn SET
+          released = COALESCE((SELECT MIN(r.released) FROM release_vn rv JOIN releases r ON r.id = rv.rid
+                               WHERE rv.vid = vn.id AND rv.rtype <> 'trial' AND r.released BETWEEN 1 AND 99999998), 0),
+          has_ero = EXISTS (SELECT 1 FROM release_vn rv JOIN releases r ON r.id = rv.rid WHERE rv.vid = vn.id AND r.has_ero),
+          minage = COALESCE((SELECT MAX(r.minage) FROM release_vn rv JOIN releases r ON r.id = rv.rid WHERE rv.vid = vn.id), -1),
+          freeware = EXISTS (SELECT 1 FROM release_vn rv JOIN releases r ON r.id = rv.rid
+                             WHERE rv.vid = vn.id AND r.freeware AND r.official AND NOT r.patch AND rv.rtype = 'complete'),
+          platforms = COALESCE((SELECT group_concat(p, ' ') FROM (
+                        SELECT DISTINCT rp.platform AS p FROM release_vn rv JOIN releases r ON r.id = rv.rid
+                        JOIN release_platforms rp ON rp.rid = r.id WHERE rv.vid = vn.id AND NOT r.patch ORDER BY p)), ''),
+          developers = COALESCE((SELECT group_concat(pid, ' ') FROM (
+                        SELECT DISTINCT rpr.pid AS pid FROM release_vn rv JOIN releases r ON r.id = rv.rid
+                        JOIN release_producers rpr ON rpr.rid = r.id WHERE rv.vid = vn.id AND r.official AND rpr.developer)), '')
+        {w_vn};
+        ",
+        w_vn_and = if w_vn.is_empty() { "WHERE".to_string() } else { format!("{w_vn} AND") },
+    ))?;
+    Ok(())
+}
+
 pub fn open_catalog(path: &Path) -> Result<Connection> {
     let c = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    Ok(c)
+}
+
+pub fn open_catalog_rw(path: &Path) -> Result<Connection> {
+    let c = Connection::open(path)?;
+    c.busy_timeout(std::time::Duration::from_secs(10))?;
     Ok(c)
 }
 
@@ -72,6 +134,8 @@ pub fn open_user(path: &Path) -> Result<Connection> {
         "
         CREATE TABLE IF NOT EXISTS marks(vid INTEGER PRIMARY KEY, status TEXT NOT NULL, note TEXT, updated TEXT DEFAULT (datetime('now')));
         CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
+        CREATE TABLE IF NOT EXISTS source_index(source TEXT NOT NULL, key TEXT NOT NULL, url TEXT NOT NULL, PRIMARY KEY(source, key));
+        CREATE TABLE IF NOT EXISTS source_meta(source TEXT PRIMARY KEY, fetched_at TEXT, entries INTEGER);
         ",
     )?;
     Ok(c)

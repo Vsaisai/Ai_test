@@ -11,6 +11,9 @@ export const DEFAULTS = {
   spoiler: 0,             // 0 none, 1 minor, 2 all
   theme: 'auto',          // auto | dark | light
   hideCancelled: false,
+  updatePolicy: 'smart',  // smart: small updates automatically, ask before a full re-download
+                          // auto: everything automatically | manual: only from Settings
+  lastUpdateCheck: 0,
 };
 
 let cache = null;
