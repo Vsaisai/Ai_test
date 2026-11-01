@@ -156,7 +156,8 @@ export async function viewHome(root) {
 }
 
 function emptyDb(st) {
-  const log = h('pre', { class: 'log' }, (st.import?.log || []).join('\n'));
+  const tail = l => (l || []).slice(-12).join('\n');
+  const log = h('pre', { class: 'log' }, tail(st.import?.log));
   const btn = h('button', { class: 'btn primary', onclick: async () => {
     btn.disabled = true;
     await api.startImport();
@@ -164,7 +165,7 @@ function emptyDb(st) {
   } }, 'Скачать базу VNDB (~190 МБ)');
   const poll = async () => {
     const s = await api.status();
-    log.textContent = (s.import.log || []).join('\n') + (s.import.error ? `\nОшибка: ${s.import.error}` : '');
+    log.textContent = tail(s.import.log) + (s.import.error ? `\nОшибка: ${s.import.error}\nНажмите кнопку ещё раз — загрузка продолжится с места обрыва.` : '');
     if (s.ready) { toast('База готова'); location.reload(); return; }
     if (s.import.running) setTimeout(poll, 1500); else btn.disabled = false;
   };
