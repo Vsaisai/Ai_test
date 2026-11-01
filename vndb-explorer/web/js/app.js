@@ -1,0 +1,173 @@
+// Entry point: navigation + hash router.
+import { applyTheme, settings, save, IN_APP, APP_VERSION, RELEASES_API, RELEASES_PAGE } from './store.js';
+import { h, toast } from './ui.js';
+import { api } from './api.js';
+import { viewHome, viewShelf, viewSearch, viewTags, viewTag, viewVn, viewMy, viewSettings } from './views.js';
+
+const NAV = [
+  ['#/', '📚', 'Полки'],
+  ['#/search', '🔎', 'Поиск'],
+  ['#/tags', '🏷️', 'Теги'],
+  ['#/my', '❤️', 'Мои'],
+  ['#/settings', '⚙️', 'Настройки'],
+];
+
+function buildNav() {
+  const items = NAV.map(([href, icon, label]) => h('a', { href, 'data-href': href }, h('span', { class: 'ico' }, icon), h('span', { class: 'lbl' }, label)));
+  document.getElementById('mainnav').replaceChildren(...items);
+  document.getElementById('bottomnav').replaceChildren(...items.map(a => a.cloneNode(true)));
+}
+
+function highlightNav(path) {
+  const section = '#/' + (path.split('/')[1] || '');
+  document.querySelectorAll('[data-href]').forEach(a => {
+    const href = a.dataset.href;
+    const on = href === '#/' ? ['#/', '#/shelf', '#/vn'].includes(section) : section.startsWith(href) || (href === '#/tags' && section === '#/tag');
+    a.classList.toggle('on', on);
+  });
+}
+
+let token = 0;
+
+async function route() {
+  const raw = location.hash.slice(1) || '/';
+  const [path, query = ''] = raw.split('?');
+  const params = new URLSearchParams(query);
+  const parts = path.split('/').filter(Boolean);
+  const root = document.getElementById('view');
+  const my = ++token;
+  const view = h('div', { class: 'view' });
+  root.replaceChildren(view);
+  document.title = 'VN Shelf';
+  highlightNav(path);
+  window.scrollTo(0, 0);
+  const guard = el => (my === token ? el : document.createElement('div'));
+  const target = guard(view);
+  switch (parts[0]) {
+    case undefined: return viewHome(target);
+    case 'shelf': return viewShelf(target, parts[1], params);
+    case 'search': return viewSearch(target, params);
+    case 'tags': return viewTags(target, parts[1], params);
+    case 'tag': return viewTag(target, parts[1]);
+    case 'vn': return viewVn(target, parts[1]);
+    case 'my': return viewMy(target, parts[1]);
+    case 'settings': return viewSettings(target);
+    default: view.append(h('p', {}, 'Страница не найдена. ', h('a', { href: '#/' }, 'На главную')));
+  }
+}
+
+document.getElementById('quicksearch').addEventListener('submit', e => {
+  e.preventDefault();
+  const q = document.getElementById('quickq').value.trim();
+  location.hash = q ? `#/search?q=${encodeURIComponent(q)}` : '#/search';
+});
+
+// ---------- updates ----------
+
+const banner = h('div', { class: 'update-banner', hidden: true });
+document.body.insertBefore(banner, document.getElementById('view'));
+
+export function showBanner(text, actions = []) {
+  banner.replaceChildren(h('span', {}, text), ...actions, h('button', { class: 'linkish', onclick: () => { banner.hidden = true; } }, 'Скрыть'));
+  banner.hidden = false;
+}
+
+async function watchJob(doneText) {
+  for (;;) {
+    await new Promise(r => setTimeout(r, 2000));
+    const st = await api.status().catch(() => null);
+    if (!st) continue;
+    const job = st.import;
+    if (job.running) {
+      showBanner(`⏳ ${job.log[job.log.length - 1] || 'Обновление…'}`);
+      continue;
+    }
+    if (job.error) showBanner(`⚠️ Обновление не удалось: ${job.error}`);
+    else { showBanner(doneText, [h('button', { class: 'btn', onclick: () => location.reload() }, 'Обновить страницу')]); api.resetTags(); }
+    return;
+  }
+}
+
+export async function checkUpdates({ force = false, interactive = false } = {}) {
+  const s = settings();
+  if (!interactive && s.updatePolicy === 'manual') return null;
+  if (!force && Date.now() - (s.lastUpdateCheck || 0) < 6 * 3600 * 1000) return null;
+  let r;
+  try { r = await api.updates(force); } catch (e) { if (interactive) toast(`Нет связи с VNDB: ${e.message}`); return null; }
+  if (!r.ready) return r;
+  save({ lastUpdateCheck: Date.now() });
+  const c = r.check;
+  const fresh = c.new_vns + c.new_releases;
+  const full = async () => { await api.startImport(); showBanner('⏳ Скачиваю свежую базу VNDB…'); watchJob('✅ База полностью обновлена.'); };
+  if (c.big) {
+    if (s.updatePolicy === 'auto' && !interactive) { full(); return r; }
+    showBanner(`База сильно отстала от VNDB (${reasonRu(c)}). Нужна полная загрузка (~190 МБ).`,
+      [h('button', { class: 'btn primary', onclick: full }, 'Обновить сейчас')]);
+  } else if (fresh > 0) {
+    const go = async () => { await api.sync(); showBanner(`⏳ Добавляю ${c.new_vns} новелл и ${c.new_releases} релизов…`); watchJob(`✅ Добавлено новелл: ${c.new_vns}, релизов: ${c.new_releases}.`); };
+    if (!interactive) go();
+    else showBanner(`На VNDB появилось ${c.new_vns} новелл и ${c.new_releases} релизов.`, [h('button', { class: 'btn primary', onclick: go }, 'Подтянуть')]);
+  } else if (interactive) {
+    toast('База актуальна');
+  }
+  return r;
+}
+
+function reasonRu(c) {
+  if (c.new_vns > 1500) return `новых новелл: ${c.new_vns}`;
+  if (c.new_releases > 6000) return `новых релизов: ${c.new_releases}`;
+  return `последняя полная загрузка ${Math.round(c.days_since_import)} дн. назад`;
+}
+
+// ---------- app updates (Android build only) ----------
+
+function newer(a, b) {
+  const pa = a.split('.').map(Number); const pb = b.split('.').map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) > (pb[i] || 0);
+  }
+  return false;
+}
+
+export async function checkAppUpdate({ interactive = false } = {}) {
+  if (!IN_APP) return null;
+  const s = settings();
+  if (!interactive && Date.now() - (s.lastAppCheck || 0) < 24 * 3600 * 1000) return null;
+  try {
+    const r = await fetch(RELEASES_API, { headers: { Accept: 'application/vnd.github+json' } });
+    if (r.status === 404) {
+      // private repository: the API needs a login, the releases page in the browser works
+      if (interactive) showBanner('Версию не проверить автоматически (репозиторий закрыт). Откройте страницу релизов:', [h('a', { class: 'btn primary', href: RELEASES_PAGE }, 'Релизы на GitHub')]);
+      return null;
+    }
+    if (!r.ok) throw new Error(`GitHub: HTTP ${r.status}`);
+    const list = await r.json();
+    save({ lastAppCheck: Date.now() });
+    const rel = list.find(x => !x.draft && !x.prerelease && /^mobile-v/.test(x.tag_name));
+    if (!rel) { if (interactive) toast('Релизов приложения пока нет'); return null; }
+    const ver = rel.tag_name.replace(/^mobile-v/, '');
+    const apk = (rel.assets || []).find(a => a.name.endsWith('.apk'));
+    if (newer(ver, APP_VERSION) && apk) {
+      showBanner(`Вышла новая версия приложения ${ver} (у вас ${APP_VERSION}).`,
+        [h('a', { class: 'btn primary', href: apk.browser_download_url }, 'Скачать APK'),
+         h('a', { class: 'btn', href: rel.html_url }, 'Что нового')]);
+    } else if (interactive) {
+      toast(`Установлена последняя версия (${APP_VERSION})`);
+    }
+    return rel;
+  } catch (e) {
+    if (interactive) toast(e.message);
+    return null;
+  }
+}
+
+applyTheme();
+buildNav();
+window.addEventListener('hashchange', route);
+route();
+setTimeout(() => checkUpdates(), 1500);
+setTimeout(() => checkAppUpdate(), 4000);
+
+if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+  navigator.serviceWorker.register('sw.js').catch(() => {});
+}

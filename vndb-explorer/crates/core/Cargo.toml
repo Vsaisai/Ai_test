@@ -1,0 +1,24 @@
+[package]
+name = "vndb-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Offline VNDB catalog: dump importer, SQLite storage, tag tree, ranked tag search, shelves and where-to-get links"
+
+[dependencies]
+anyhow = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tar = "0.4"
+zstd = "0.13"
+urlencoding = "2"
+unicode-normalization = "0.1"
+
+# TLS: the system stack on desktop, rustls with bundled Mozilla roots on Android.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["native-tls"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots"] }
