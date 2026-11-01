@@ -6,7 +6,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 : "${ANDROID_NDK_HOME:?set ANDROID_NDK_HOME to the NDK directory}"
 ABIS="${ABIS:-arm64-v8a armeabi-v7a x86_64}"
-VERSION="${VNSHELF_VERSION:-0.3.0}"
+VERSION="${VNSHELF_VERSION:-$(tr -d ' \n' < "$ROOT/mobile/VERSION")}"
 export VNSHELF_VERSION="$VERSION"
 
 targets=()

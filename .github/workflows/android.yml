@@ -1,10 +1,15 @@
 name: Android APK
 
-# Push a tag like `mobile-v0.3.0` to build the APK and publish it as a GitHub Release.
-# Manual runs (Actions -> Android APK -> Run workflow) only upload the APK as an artifact.
+# Every push to the `mobile` branch builds the APK. If the version in vndb-explorer/mobile/VERSION
+# has no release yet, a GitHub Release `mobile-v<version>` (and its tag) is created with the APK.
+# Bump VERSION to publish a new version. Pushing a `mobile-v*` tag works too.
 on:
   push:
+    branches: [mobile]
     tags: ['mobile-v*']
+    paths:
+      - 'vndb-explorer/**'
+      - '.github/workflows/android.yml'
   workflow_dispatch:
 
 permissions:
@@ -35,12 +40,12 @@ jobs:
       - name: Android SDK platform 35
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0" > /dev/null
 
-      - name: Version from tag
+      - name: Version
         run: |
           if [[ "$GITHUB_REF" == refs/tags/mobile-v* ]]; then
             echo "VNSHELF_VERSION=${GITHUB_REF#refs/tags/mobile-v}" >> "$GITHUB_ENV"
           else
-            echo "VNSHELF_VERSION=0.0.${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+            echo "VNSHELF_VERSION=$(tr -d ' \n' < mobile/VERSION)" >> "$GITHUB_ENV"
           fi
 
       - name: Release signing key (optional, from secrets)
@@ -72,11 +77,17 @@ jobs:
           name: VNShelf-${{ env.VNSHELF_VERSION }}
           path: vndb-explorer/target/apk/*.apk
 
-      - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/mobile-v')
+      - name: Publish release (new versions only)
+        if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" target/apk/*.apk \
+          TAG="mobile-v$VNSHELF_VERSION"
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "Release $TAG already exists: bump vndb-explorer/mobile/VERSION to publish a new one."
+            exit 0
+          fi
+          gh release create "$TAG" target/apk/*.apk \
+            --target "$GITHUB_SHA" \
             --title "VN Shelf $VNSHELF_VERSION для Android" \
             --notes-file mobile/RELEASE_NOTES.md

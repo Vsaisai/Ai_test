@@ -27,11 +27,9 @@ ANDROID_HOME=~/Android/Sdk ANDROID_NDK_HOME=~/Android/Sdk/ndk/27.2.12479018 ./mo
 
 ### Выпуск новой версии
 
-```bash
-git tag mobile-v0.3.1 && git push origin mobile-v0.3.1
-```
-
-Workflow `.github/workflows/android.yml` соберёт APK и создаст релиз. По умолчанию APK подписывается
+Поменяйте номер в `mobile/VERSION` и запушьте ветку `mobile`. Workflow `.github/workflows/android.yml`
+соберёт APK и, если релиза `mobile-v<версия>` ещё нет, создаст его (вместе с тегом). Пуш тега
+`mobile-v*` тоже запускает сборку. По умолчанию APK подписывается
 отладочным ключом из репозитория (`mobile/android/app/debug.keystore`), чтобы обновления ставились
 поверх. Для настоящей подписи добавьте секреты `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`,
 `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD` (после смены ключа приложение придётся один раз
