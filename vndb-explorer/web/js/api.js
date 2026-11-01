@@ -21,7 +21,12 @@ export const img = path => path ? `${base()}/img/${path}` : '';
 let tagsPromise = null;
 
 export const api = {
-  status: () => call('GET', '/api/status'),
+  async status() {
+    const st = await call('GET', '/api/status');
+    // Android app: keep the screen on while a download / import runs (sleep would cut the connection)
+    try { window.VNShelfNative?.keepAwake(!!st.import?.running); } catch { /* not in the app */ }
+    return st;
+  },
   startImport: () => call('POST', '/api/import', {}),
   updates: (force = false) => call('GET', `/api/updates${force ? '?force=1' : ''}`),
   sync: () => call('POST', '/api/sync', {}),
