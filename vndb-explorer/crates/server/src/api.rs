@@ -159,6 +159,9 @@ fn progress_view(kind: &str, p: &vndb_core::progress::Progress, tr: &mut Track) 
 
 pub struct AppState {
     pub data_dir: PathBuf,
+    /// Serve the web UI from this folder instead of the copy built into the binary
+    /// (the PC package ships it as `client/web`, so it can be edited without rebuilding).
+    pub web_dir: Option<PathBuf>,
     pub catalog: RwLock<Option<Arc<Catalog>>>,
     pub shelves: RwLock<Shelves>,
     pub user: Mutex<Connection>,
@@ -186,6 +189,7 @@ impl AppState {
             None
         };
         Ok(Self {
+            web_dir: None,
             shelves: RwLock::new(Shelves::load(&data_dir)?),
             user: Mutex::new(vndb_core::db::open_user(&data_dir.join("user.sqlite"))?),
             catalog: RwLock::new(catalog),
@@ -992,13 +996,37 @@ async fn image(State(s): St, Path(path): Path<String>) -> Response {
 
 // ---------- static web UI ----------
 
-async fn static_file(uri: Uri) -> Response {
+/// File from the external web folder, if configured and present (no `..`, no absolute paths).
+fn external_file(dir: &std::path::Path, path: &str) -> Option<Vec<u8>> {
+    let rel = std::path::Path::new(path);
+    if rel
+        .components()
+        .any(|c| !matches!(c, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+    std::fs::read(dir.join(rel)).ok()
+}
+
+async fn static_file(State(s): St, uri: Uri) -> Response {
     let mut path = uri.path().trim_start_matches('/').to_string();
-    if path.is_empty() || Assets::get(&path).is_none() && !path.contains('.') {
+    let exists = |p: &str| {
+        s.web_dir
+            .as_deref()
+            .map(|d| d.join(p).is_file())
+            .unwrap_or(false)
+            || Assets::get(p).is_some()
+    };
+    if path.is_empty() || !exists(&path) && !path.contains('.') {
         path = "index.html".into();
     }
-    match Assets::get(&path) {
-        Some(f) => {
+    let data = s
+        .web_dir
+        .as_deref()
+        .and_then(|d| external_file(d, &path))
+        .or_else(|| Assets::get(&path).map(|f| f.data.into_owned()));
+    match data {
+        Some(bytes) => {
             let mime = mime_guess::from_path(&path).first_or_octet_stream();
             let cache = if path == "index.html" || path == "sw.js" {
                 "no-cache"
@@ -1008,7 +1036,7 @@ async fn static_file(uri: Uri) -> Response {
             Response::builder()
                 .header(header::CONTENT_TYPE, mime.as_ref())
                 .header(header::CACHE_CONTROL, cache)
-                .body(Body::from(f.data.into_owned()))
+                .body(Body::from(bytes))
                 .unwrap()
         }
         None => StatusCode::NOT_FOUND.into_response(),
@@ -1025,5 +1053,16 @@ mod tests {
         assert!(!valid_image_path("../etc/passwd"));
         assert!(!valid_image_path("cv/59/../../x.jpg"));
         assert!(!valid_image_path("ch/12/12.jpg"));
+    }
+
+    #[test]
+    fn external_web_dir_is_sandboxed() {
+        let dir = std::env::temp_dir().join(format!("vnshelf-web-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("js")).unwrap();
+        std::fs::write(dir.join("js/app.js"), "x").unwrap();
+        assert_eq!(external_file(&dir, "js/app.js").as_deref(), Some(&b"x"[..]));
+        assert!(external_file(&dir, "../etc/passwd").is_none());
+        assert!(external_file(&dir, "/etc/passwd").is_none());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

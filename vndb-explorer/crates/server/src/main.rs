@@ -49,6 +49,9 @@ enum Cmd {
         /// Start downloading the database right away if there is none yet
         #[arg(long)]
         auto_import: bool,
+        /// Serve the web UI from this folder (default: the copy built into the program)
+        #[arg(long, value_name = "DIR")]
+        web: Option<PathBuf>,
     },
 }
 
@@ -65,6 +68,7 @@ fn main() -> Result<()> {
     match cli.cmd.unwrap_or(Cmd::Serve {
         addr: "127.0.0.1:8080".parse()?,
         auto_import: false,
+        web: None,
     }) {
         Cmd::Import { file } => {
             let db = data.join("catalog.sqlite");
@@ -150,12 +154,21 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Serve { addr, auto_import } => {
+        Cmd::Serve {
+            addr,
+            auto_import,
+            web,
+        } => {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
             rt.block_on(async move {
-                let state = Arc::new(api::AppState::new(data)?);
+                let mut state = api::AppState::new(data)?;
+                if let Some(dir) = web.filter(|d| d.join("index.html").is_file()) {
+                    eprintln!("Web UI from {}", dir.display());
+                    state.web_dir = Some(dir);
+                }
+                let state = Arc::new(state);
                 if auto_import && !state.ready() {
                     api::start_import(state.clone(), None);
                 } else {
