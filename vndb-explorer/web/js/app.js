@@ -1,6 +1,6 @@
 // Entry point: navigation + hash router.
 import { applyTheme, settings, save } from './store.js';
-import { h, toast } from './ui.js';
+import { h, toast, jobPanel } from './ui.js';
 import { api } from './api.js';
 import { viewHome, viewShelf, viewSearch, viewTags, viewTag, viewVn, viewMy, viewSettings } from './views.js';
 
@@ -68,18 +68,18 @@ const banner = h('div', { class: 'update-banner', hidden: true });
 document.body.insertBefore(banner, document.getElementById('view'));
 
 export function showBanner(text, actions = []) {
-  banner.replaceChildren(h('span', {}, text), ...actions, h('button', { class: 'linkish', onclick: () => { banner.hidden = true; } }, 'Скрыть'));
+  banner.replaceChildren(typeof text === 'string' ? h('span', {}, text) : text, ...actions, h('button', { class: 'linkish', onclick: () => { banner.hidden = true; } }, 'Скрыть'));
   banner.hidden = false;
 }
 
 async function watchJob(doneText) {
   for (;;) {
-    await new Promise(r => setTimeout(r, 2000));
+    await new Promise(r => setTimeout(r, 1000));
     const st = await api.status().catch(() => null);
     if (!st) continue;
     const job = st.import;
     if (job.running) {
-      showBanner(`⏳ ${job.log[job.log.length - 1] || 'Обновление…'}`);
+      showBanner(jobPanel(job, { compact: true, link: '#/settings' }));
       continue;
     }
     if (job.error) showBanner(`⚠️ Обновление не удалось: ${job.error}`);
@@ -124,6 +124,8 @@ buildNav();
 window.addEventListener('hashchange', route);
 route();
 setTimeout(() => checkUpdates(), 1500);
+// a job may already be running (e.g. the app was reopened during a download)
+api.status().then(st => { if (st.ready && st.import?.running) watchJob('✅ Готово.'); }).catch(() => {});
 
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   navigator.serviceWorker.register('sw.js').catch(() => {});

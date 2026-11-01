@@ -8,6 +8,7 @@
 use crate::copy::{split, Row};
 use crate::db;
 use crate::extlinks;
+use crate::progress::{Progress, Reporter};
 use anyhow::{bail, Context, Result};
 use rusqlite::types::Value;
 use rusqlite::{params, Connection};
@@ -32,7 +33,7 @@ pub struct Stats {
 }
 
 /// Run a full import. `progress` receives human-readable status lines.
-pub fn import(src: Source, db_path: &Path, progress: &dyn Fn(&str)) -> Result<Stats> {
+pub fn import(src: Source, db_path: &Path, rep: &Reporter) -> Result<Stats> {
     let dir = db_path
         .parent()
         .map(Path::to_path_buf)
@@ -40,7 +41,7 @@ pub fn import(src: Source, db_path: &Path, progress: &dyn Fn(&str)) -> Result<St
     let downloaded;
     let file: &Path = match src {
         Source::Url(u) => {
-            downloaded = download(u, &dir, progress)?;
+            downloaded = download(u, &dir, rep)?;
             &downloaded
         }
         Source::File(p) => p,
@@ -48,17 +49,50 @@ pub fn import(src: Source, db_path: &Path, progress: &dyn Fn(&str)) -> Result<St
     let reader: Box<dyn Read> = Box::new(
         std::fs::File::open(file).with_context(|| format!("cannot open {}", file.display()))?,
     );
-    let stats = import_reader(reader, db_path, progress)?;
+    let stats = import_reader(reader, file_len(file), db_path, rep)?;
     if matches!(src, Source::Url(_)) {
         let _ = std::fs::remove_file(file);
     }
     Ok(stats)
 }
 
+fn file_len(p: &Path) -> Option<u64> {
+    std::fs::metadata(p).ok().map(|m| m.len())
+}
+
+/// Counts compressed bytes consumed by the decoder and reports the "read" stage.
+struct Counting<'a, R> {
+    inner: R,
+    rep: &'a Reporter<'a>,
+    done: u64,
+    total: Option<u64>,
+    last: u64,
+}
+
+impl<R: Read> Read for Counting<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.done += n as u64;
+        if self.done - self.last >= 256 * 1024 || n == 0 {
+            self.last = self.done;
+            self.rep.progress(Progress {
+                stage: "read",
+                step: 2,
+                steps: 8,
+                done: self.done,
+                total: self.total,
+                unit: "bytes",
+            });
+        }
+        Ok(n)
+    }
+}
+
 /// Download the dump into `dir`, resuming after dropped connections (mobile networks, VPNs,
 /// the phone going to sleep). A partial file is kept between attempts and between runs, and is
 /// only resumed if it belongs to the same dump (the dated file name behind `-latest`).
-pub fn download(url: &str, dir: &Path, progress: &dyn Fn(&str)) -> Result<std::path::PathBuf> {
+pub fn download(url: &str, dir: &Path, rep: &Reporter) -> Result<std::path::PathBuf> {
+    let progress = |m: &str| rep.log(m);
     use std::io::Write;
     std::fs::create_dir_all(dir)?;
     let http = crate::http::blocking_client(None)?;
@@ -137,6 +171,18 @@ pub fn download(url: &str, dir: &Path, progress: &dyn Fn(&str)) -> Result<std::p
                 .open(&part)?;
             let mut got = if append { have } else { 0 };
             let mut last_report = got;
+            let mut last_tick = got;
+            let tick = |done: u64| {
+                rep.progress(Progress {
+                    stage: "download",
+                    step: 1,
+                    steps: 8,
+                    done,
+                    total,
+                    unit: "bytes",
+                })
+            };
+            tick(got);
             let mut buf = vec![0u8; 256 * 1024];
             loop {
                 let n = resp.read(&mut buf)?;
@@ -145,7 +191,11 @@ pub fn download(url: &str, dir: &Path, progress: &dyn Fn(&str)) -> Result<std::p
                 }
                 f.write_all(&buf[..n])?;
                 got += n as u64;
-                if got - last_report >= 8 * 1_048_576 {
+                if got - last_tick >= 256 * 1024 {
+                    last_tick = got;
+                    tick(got);
+                }
+                if got - last_report >= 16 * 1_048_576 {
                     last_report = got;
                     match total {
                         Some(t) => progress(&format!(
@@ -184,12 +234,14 @@ pub fn download(url: &str, dir: &Path, progress: &dyn Fn(&str)) -> Result<std::p
     Ok(done)
 }
 
-/// Import from any reader of a `.tar.zst` dump.
-pub fn import_reader(
-    reader: Box<dyn Read>,
+/// Import from any reader of a `.tar.zst` dump (`len` = compressed size, for progress).
+pub fn import_reader<R: Read>(
+    reader: R,
+    len: Option<u64>,
     db_path: &Path,
-    progress: &dyn Fn(&str),
+    rep: &Reporter,
 ) -> Result<Stats> {
+    let progress = |m: &str| rep.log(m);
     if let Some(d) = db_path.parent() {
         std::fs::create_dir_all(d)?;
     }
@@ -200,11 +252,19 @@ pub fn import_reader(
         db::create_schema(&conn)?;
         conn.execute_batch(TMP_SCHEMA)?;
         let tx = conn.transaction()?;
-        let ts = read_archive(reader, &tx, progress)?;
-        finish(&tx, &ts, progress)?;
+        let counting = Counting {
+            inner: reader,
+            rep,
+            done: 0,
+            total: len,
+            last: 0,
+        };
+        let ts = read_archive(counting, &tx, &progress)?;
+        finish(&tx, &ts, rep)?;
         let stats = stats(&tx, ts)?;
         tx.commit()?;
         progress("Compacting database");
+        rep.stage("compact", 7, 8);
         conn.execute_batch("PRAGMA optimize; VACUUM;")?;
         stats
     };
@@ -276,7 +336,7 @@ fn link(kind: &'static str) -> impl Fn(&Row) -> Option<Vec<Value>> {
     move |r: &Row| Some(vec![s(kind), id(r, 0)?, int(r.i(1))])
 }
 
-fn read_archive(reader: Box<dyn Read>, c: &Connection, progress: &dyn Fn(&str)) -> Result<String> {
+fn read_archive<R: Read>(reader: R, c: &Connection, progress: &dyn Fn(&str)) -> Result<String> {
     let dec = zstd::stream::read::Decoder::new(reader)?;
     let mut ar = tar::Archive::new(dec);
     let mut timestamp = String::new();
@@ -409,7 +469,8 @@ fn read_archive(reader: Box<dyn Read>, c: &Connection, progress: &dyn Fn(&str)) 
     Ok(timestamp)
 }
 
-fn finish(c: &Connection, timestamp: &str, progress: &dyn Fn(&str)) -> Result<()> {
+fn finish(c: &Connection, timestamp: &str, rep: &Reporter) -> Result<()> {
+    let progress = |m: &str| rep.log(m);
     c.execute(
         "INSERT OR REPLACE INTO meta(key, value) VALUES ('dump_timestamp', ?1)",
         [timestamp],
@@ -424,6 +485,7 @@ fn finish(c: &Connection, timestamp: &str, progress: &dyn Fn(&str)) -> Result<()
     )?;
 
     progress("Aggregating tag votes");
+    rep.stage("tags", 3, 8);
     c.execute_batch(
         "INSERT INTO vn_tags(vid, tag, rating, spoiler, lie)
          SELECT tv.vid, tv.tag, ROUND(AVG(tv.vote), 2),
@@ -437,6 +499,7 @@ fn finish(c: &Connection, timestamp: &str, progress: &dyn Fn(&str)) -> Result<()
     )?;
 
     progress("Resolving links and images");
+    rep.stage("links", 4, 8);
     {
         let mut ins_r = c.prepare("INSERT INTO release_links(rid, site, url) VALUES (?1,?2,?3)")?;
         let mut ins_v = c.prepare("INSERT INTO vn_links(vid, site, url) VALUES (?1,?2,?3)")?;
@@ -473,8 +536,10 @@ fn finish(c: &Connection, timestamp: &str, progress: &dyn Fn(&str)) -> Result<()
     )?;
 
     progress("Building indexes");
+    rep.stage("indexes", 5, 8);
     db::create_indexes(c)?;
     progress("Computing languages, platforms and dates");
+    rep.stage("derived", 6, 8);
     db::recompute_derived(c, None)?;
     Ok(())
 }

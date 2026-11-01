@@ -24,7 +24,12 @@ export const api = {
   async status() {
     const st = await call('GET', '/api/status');
     // Android app: keep the screen on while a download / import runs (sleep would cut the connection)
-    try { window.VNShelfNative?.keepAwake(!!st.import?.running); } catch { /* not in the app */ }
+    try {
+      const running = !!st.import?.running;
+      window.VNShelfNative?.keepAwake(running);
+      // Android: hand the job over to a foreground service with a progress notification
+      if (running) window.VNShelfNative?.watchJob();
+    } catch { /* not in the app */ }
     return st;
   },
   startImport: () => call('POST', '/api/import', {}),

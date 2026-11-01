@@ -274,3 +274,22 @@ details.panel > summary { cursor: pointer; font-weight: 600; }
 .where-group.community h3 { color: var(--accent); }
 .src-list { padding-left: 18px; margin: 6px 0 12px; }
 .src-list li { margin: 4px 0; }
+
+/* ---- job progress ---- */
+.job { display: flex; flex-direction: column; gap: 8px; text-align: left; margin-top: 12px; }
+.job-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.job-pct { font-size: 2rem; font-weight: 800; line-height: 1; font-variant-numeric: tabular-nums; }
+.job-stage { display: flex; justify-content: space-between; gap: 8px; font-size: .92em; }
+.job-detail { font-variant-numeric: tabular-nums; }
+.job.compact { margin: 0; flex: 1 1 260px; gap: 4px; }
+.job.compact .job-head a { margin-left: auto; }
+.error-job { color: var(--exclude); }
+.bar { height: 8px; border-radius: 6px; background: var(--panel-2); overflow: hidden; position: relative; }
+.bar.big { height: 14px; }
+.bar.thin { height: 5px; }
+.bar > i { display: block; height: 100%; background: var(--accent); border-radius: inherit; transition: width .4s ease; }
+.bar.indet > i { width: 35%; position: absolute; animation: indet 1.3s ease-in-out infinite; }
+@keyframes indet { from { left: -35%; } to { left: 100%; } }
+@media (prefers-reduced-motion: reduce) { .bar.indet > i { animation: none; width: 100%; opacity: .4; } }
+.job-details summary { cursor: pointer; color: var(--accent); }
+.job-details .meta { margin: 8px 0; }
