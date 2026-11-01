@@ -7,9 +7,13 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// Start the server on `127.0.0.1:<random port>` in a background thread and return the port.
-/// Used by mobile shells.
-pub fn spawn_local(data_dir: PathBuf) -> anyhow::Result<u16> {
+/// Fixed port for the mobile app: the WebView origin (and therefore localStorage settings and
+/// the service-worker cache) must stay the same between launches.
+pub const MOBILE_PORT: u16 = 38517;
+
+/// Start the server on `127.0.0.1:<preferred or random port>` in a background thread and
+/// return the port. Used by mobile shells.
+pub fn spawn_local(data_dir: PathBuf, preferred_port: u16) -> anyhow::Result<u16> {
     std::fs::create_dir_all(&data_dir)?;
     let (tx, rx) = std::sync::mpsc::channel::<anyhow::Result<u16>>();
     std::thread::Builder::new()
@@ -32,9 +36,14 @@ pub fn spawn_local(data_dir: PathBuf) -> anyhow::Result<u16> {
                     if state.ready() {
                         api::maybe_refresh_sources(state.clone());
                     }
-                    let listener =
-                        tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
-                            .await?;
+                    let preferred = SocketAddr::from(([127, 0, 0, 1], preferred_port));
+                    let listener = match tokio::net::TcpListener::bind(preferred).await {
+                        Ok(l) => l,
+                        Err(_) => {
+                            tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                                .await?
+                        }
+                    };
                     let port = listener.local_addr()?.port();
                     anyhow::Ok((state, listener, port))
                 }

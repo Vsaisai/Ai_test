@@ -1,6 +1,13 @@
 // Per-device settings (localStorage). Personal lists live on the server.
 const KEY = 'vnshelf.settings';
 
+/** Running inside the Android app (WebView with a custom user agent)? */
+export const APP_VERSION = (navigator.userAgent.match(/VNShelfApp\/([\w.\-]+)/) || [])[1] || null;
+export const IN_APP = APP_VERSION !== null;
+/** Where mobile releases are published. */
+export const RELEASES_API = 'https://api.github.com/repos/Vsaisai/Ai_test/releases?per_page=20';
+export const RELEASES_PAGE = 'https://github.com/Vsaisai/Ai_test/releases';
+
 export const DEFAULTS = {
   apiBase: '',            // '' = same server; e.g. 'http://192.168.1.10:8080' for a mobile app
   langs: 'en',            // preferred languages, comma separated, in order
@@ -14,6 +21,7 @@ export const DEFAULTS = {
   updatePolicy: 'smart',  // smart: small updates automatically, ask before a full re-download
                           // auto: everything automatically | manual: only from Settings
   lastUpdateCheck: 0,
+  lastAppCheck: 0,
 };
 
 let cache = null;

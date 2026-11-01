@@ -1,0 +1,14 @@
+[package]
+name = "vnshelf-mobile"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Android glue: starts the vndb-web server inside the app for the WebView"
+
+[lib]
+name = "vnshelf"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+vndb-web = { path = "../server" }
+jni = "0.21"

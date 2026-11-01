@@ -1,0 +1,82 @@
+name: Android APK
+
+# Push a tag like `mobile-v0.3.0` to build the APK and publish it as a GitHub Release.
+# Manual runs (Actions -> Android APK -> Run workflow) only upload the APK as an artifact.
+on:
+  push:
+    tags: ['mobile-v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: vndb-explorer
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Rust toolchain and Android targets
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+          cargo install cargo-ndk --locked
+
+      - name: Android SDK platform 35
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0" > /dev/null
+
+      - name: Version from tag
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/mobile-v* ]]; then
+            echo "VNSHELF_VERSION=${GITHUB_REF#refs/tags/mobile-v}" >> "$GITHUB_ENV"
+          else
+            echo "VNSHELF_VERSION=0.0.${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Release signing key (optional, from secrets)
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KS_B64" ]; then
+            echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+            echo "VNSHELF_KEYSTORE=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
+            echo "Using the release keystore from secrets"
+          else
+            echo "No ANDROID_KEYSTORE_BASE64 secret: signing with the committed debug key"
+          fi
+
+      - name: Tests
+        run: cargo test -p vndb-core -p vndb-web
+
+      - name: Build APK
+        env:
+          VNSHELF_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          VNSHELF_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          VNSHELF_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          ./mobile/build-apk.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VNShelf-${{ env.VNSHELF_VERSION }}
+          path: vndb-explorer/target/apk/*.apk
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/mobile-v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" target/apk/*.apk \
+            --title "VN Shelf $VNSHELF_VERSION для Android" \
+            --notes-file mobile/RELEASE_NOTES.md

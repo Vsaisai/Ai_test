@@ -121,6 +121,8 @@ vndb-explorer/
 ├── crates/core     vndb-core: импорт дампа, SQLite, индекс в памяти, поиск, полки, «где взять»
 ├── crates/server   vndb-web: HTTP-сервер (axum) — REST API, кеш обложек, встроенный интерфейс
 ├── crates/cli      vndb-explorer: консольный клиент онлайн-API VNDB (из первой версии)
+├── crates/mobile   libvnshelf.so: JNI-обёртка, запускает сервер внутри Android-приложения
+├── mobile/android  Android-оболочка (Java + WebView), mobile/build-apk.sh — сборка APK
 ├── web/            интерфейс: HTML/CSS/ES-модули без сборки, PWA (manifest + service worker)
 └── docs/           документация (мобильное приложение)
 ```
@@ -158,8 +160,8 @@ vndb-explorer/
 
 ### Мобильное приложение
 
-Сейчас интерфейс — PWA, его можно установить на телефон. Варианты нативного приложения описаны в
-[docs/MOBILE.md](docs/MOBILE.md).
+Ветка `mobile`: автономное Android-приложение (APK в GitHub Releases, теги `mobile-v*`) — вся база
+на телефоне, новые релизы подтягиваются сами. Подробности и сборка — [docs/MOBILE.md](docs/MOBILE.md).
 
 ## Консольный клиент
 
