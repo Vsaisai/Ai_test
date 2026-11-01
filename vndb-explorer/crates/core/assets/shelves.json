@@ -4,74 +4,465 @@
       "id": "picks",
       "title": "Подборки",
       "shelves": [
-        { "id": "top", "title": "Лучшее по рейтингу", "query": { "min_votes": 300, "sort": "rating" } },
-        { "id": "popular", "title": "Самое популярное", "query": { "sort": "votes" } },
-        { "id": "new", "title": "Новинки", "query": { "released_only": true, "min_votes": 3, "sort": "newest" } },
-        { "id": "free", "title": "Бесплатные", "query": { "freeware": true, "sort": "votes" } },
-        { "id": "short", "title": "Короткие (до 2 часов)", "query": { "length_max": 120, "sort": "votes" } },
-        { "id": "long", "title": "Длинные (50+ часов)", "query": { "length_min": 3000, "min_votes": 30, "sort": "rating" } },
-        { "id": "kinetic", "title": "Кинетические новеллы (без выборов)", "query": { "must": ["Kinetic Novel"], "sort": "votes" } }
+        {
+          "id": "top",
+          "title": "Лучшее по рейтингу",
+          "query": {
+            "min_votes": 300,
+            "sort": "rating"
+          }
+        },
+        {
+          "id": "popular",
+          "title": "Самое популярное",
+          "query": {
+            "sort": "votes"
+          }
+        },
+        {
+          "id": "new",
+          "title": "Новинки",
+          "query": {
+            "released_only": true,
+            "min_votes": 3,
+            "sort": "newest"
+          }
+        },
+        {
+          "id": "free",
+          "title": "Бесплатные",
+          "query": {
+            "freeware": true,
+            "sort": "votes"
+          }
+        },
+        {
+          "id": "short",
+          "title": "Короткие (до 2 часов)",
+          "query": {
+            "length_max": 120,
+            "sort": "votes"
+          }
+        },
+        {
+          "id": "no-ero",
+          "title": "Без откровенных сцен",
+          "query": {
+            "must": [
+              "No Sexual Content"
+            ],
+            "sort": "votes"
+          }
+        },
+        {
+          "id": "long",
+          "title": "Длинные (50+ часов)",
+          "query": {
+            "length_min": 3000,
+            "min_votes": 30,
+            "sort": "rating"
+          }
+        },
+        {
+          "id": "kinetic",
+          "title": "Кинетические новеллы (без выборов)",
+          "query": {
+            "must": [
+              "Kinetic Novel"
+            ],
+            "sort": "votes"
+          }
+        }
       ]
     },
     {
       "id": "genres",
       "title": "Жанры",
       "shelves": [
-        { "id": "romance", "title": "Романтика", "query": { "must": ["Romance"], "sort": "votes" } },
-        { "id": "comedy", "title": "Комедия", "query": { "must": ["Comedy"], "sort": "votes" } },
-        { "id": "drama", "title": "Драма", "query": { "must": ["Drama"], "sort": "votes" } },
-        { "id": "tearjerker", "title": "Накиге и утсуге (до слёз)", "query": { "want": ["Nakige", "Utsuge"], "sort": "votes" } },
-        { "id": "mystery", "title": "Мистика и загадки", "query": { "must": ["Mystery"], "sort": "votes" } },
-        { "id": "detective", "title": "Детективы", "query": { "must": ["Detective Work"], "sort": "votes" } },
-        { "id": "horror", "title": "Хоррор", "query": { "must": ["Horror"], "sort": "votes" } },
-        { "id": "thriller", "title": "Триллер", "query": { "must": ["Thriller"], "sort": "votes" } },
-        { "id": "scifi", "title": "Научная фантастика", "query": { "must": ["Science Fiction"], "sort": "votes" } },
-        { "id": "timetravel", "title": "Путешествия во времени и петли", "query": { "want": ["Time Travel", "Time Loop"], "sort": "votes" } },
-        { "id": "fantasy", "title": "Фэнтези", "query": { "must": ["Fantasy"], "sort": "votes" } },
-        { "id": "isekai", "title": "Попаданцы", "query": { "must": ["Protagonist from a Different World"], "sort": "votes" } },
-        { "id": "action", "title": "Экшн", "query": { "must": ["Action"], "sort": "votes" } },
-        { "id": "sol", "title": "Повседневность", "query": { "must": ["Slice of Life"], "sort": "votes" } },
-        { "id": "school", "title": "Школа", "query": { "must": ["School"], "sort": "votes" } }
+        {
+          "id": "romance",
+          "title": "Романтика",
+          "query": {
+            "must": [
+              "Romance"
+            ],
+            "sort": "votes"
+          }
+        },
+        {
+          "id": "comedy",
+          "title": "Комедия",
+          "query": {
+            "must": [
+              "Comedy"
+            ],
+            "sort": "votes"
+          }
+        },
+        {
+          "id": "drama",
+          "title": "Драма",
+          "query": {
+            "must": [
+              "Drama"
+            ],
+            "sort": "votes"
+          }
+        },
+        {
+          "id": "tearjerker",
+          "title": "Накиге и утсуге (до слёз)",
+          "query": {
+            "want": [
+              "Nakige",
+              "Utsuge"
+            ],
+            "sort": "votes"
+          }
+        },
+        {
+          "id": "mystery",
+          "title": "Мистика и загадки",
+          "query": {
+            "must": [
+              "Mystery"
+            ],
+            "sort": "votes"
+          }
+        },
+        {
+          "id": "detective",
+          "title": "Детективы",
+          "query": {
+            "must": [
+              "Detective Work"
+            ],
+            "sort": "votes"
+          }
+        },
+        {
+          "id": "horror",
+          "title": "Хоррор",
+          "query": {
+            "must": [
+              "Horror"
+            ],
+            "sort": "votes"
+          }
+        },
+        {
+          "id": "thriller",
+          "title": "Триллер",
+          "query": {
+            "must": [
+              "Thriller"
+            ],
+            "sort": "votes"
+          }
+        },
+        {
+          "id": "scifi",
+          "title": "Научная фантастика",
+          "query": {
+            "must": [
+              "Science Fiction"
+            ],
+            "sort": "votes"
+          }
+        },
+        {
+          "id": "timetravel",
+          "title": "Путешествия во времени и петли",
+          "query": {
+            "want": [
+              "Time Travel",
+              "Time Loop"
+            ],
+            "sort": "votes"
+          }
+        },
+        {
+          "id": "fantasy",
+          "title": "Фэнтези",
+          "query": {
+            "must": [
+              "Fantasy"
+            ],
+            "sort": "votes"
+          }
+        },
+        {
+          "id": "isekai",
+          "title": "Попаданцы",
+          "query": {
+            "must": [
+              "Protagonist from a Different World"
+            ],
+            "sort": "votes"
+          }
+        },
+        {
+          "id": "action",
+          "title": "Экшн",
+          "query": {
+            "must": [
+              "Action"
+            ],
+            "sort": "votes"
+          }
+        },
+        {
+          "id": "sol",
+          "title": "Повседневность",
+          "query": {
+            "must": [
+              "Slice of Life"
+            ],
+            "sort": "votes"
+          }
+        },
+        {
+          "id": "school",
+          "title": "Школа",
+          "query": {
+            "must": [
+              "School"
+            ],
+            "sort": "votes"
+          }
+        }
       ]
     },
     {
       "id": "romance-types",
       "title": "Кто с кем",
       "shelves": [
-        { "id": "otome", "title": "Отомэ", "query": { "must": ["Otome Game"], "sort": "votes" } },
-        { "id": "yuri", "title": "Юри", "query": { "must": ["Girl x Girl Romance"], "sort": "votes" } },
-        { "id": "bl", "title": "BL", "query": { "must": ["Boy x Boy Romance"], "sort": "votes" } },
-        { "id": "female-mc", "title": "Героиня-протагонист", "query": { "must": ["Female Protagonist"], "sort": "votes" } },
-        { "id": "harem", "title": "С гарем-концовкой", "query": { "must": ["Harem Ending"], "sort": "votes" } },
-        { "id": "adult-mc", "title": "Взрослый протагонист", "query": { "must": ["Adult Protagonist"], "sort": "votes" } }
+        {
+          "id": "otome",
+          "title": "Отомэ",
+          "query": {
+            "must": [
+              "Otome Game"
+            ],
+            "sort": "votes"
+          }
+        },
+        {
+          "id": "yuri",
+          "title": "Юри",
+          "query": {
+            "must": [
+              "Girl x Girl Romance"
+            ],
+            "sort": "votes"
+          }
+        },
+        {
+          "id": "bl",
+          "title": "BL",
+          "query": {
+            "must": [
+              "Boy x Boy Romance"
+            ],
+            "sort": "votes"
+          }
+        },
+        {
+          "id": "female-mc",
+          "title": "Героиня-протагонист",
+          "query": {
+            "must": [
+              "Female Protagonist"
+            ],
+            "sort": "votes"
+          }
+        },
+        {
+          "id": "harem",
+          "title": "С гарем-концовкой",
+          "query": {
+            "must": [
+              "Harem Ending"
+            ],
+            "sort": "votes"
+          }
+        },
+        {
+          "id": "adult-mc",
+          "title": "Взрослый протагонист",
+          "query": {
+            "must": [
+              "Adult Protagonist"
+            ],
+            "sort": "votes"
+          }
+        }
       ]
     },
     {
       "id": "gameplay",
       "title": "С геймплеем",
       "shelves": [
-        { "id": "rpg", "title": "RPG", "query": { "must": ["RPG"], "sort": "votes" } },
-        { "id": "strategy", "title": "Стратегии", "query": { "must": ["Strategy Game"], "sort": "votes" } },
-        { "id": "sim", "title": "Симуляторы", "query": { "must": ["Simulation Game"], "sort": "votes" } },
-        { "id": "dating", "title": "Dating sim", "query": { "must": ["Dating Simulation"], "sort": "votes" } },
-        { "id": "puzzle", "title": "Головоломки", "query": { "must": ["Puzzle Game"], "sort": "votes" } }
+        {
+          "id": "rpg",
+          "title": "RPG",
+          "query": {
+            "must": [
+              "RPG"
+            ],
+            "sort": "votes"
+          }
+        },
+        {
+          "id": "strategy",
+          "title": "Стратегии",
+          "query": {
+            "must": [
+              "Strategy Game"
+            ],
+            "sort": "votes"
+          }
+        },
+        {
+          "id": "sim",
+          "title": "Симуляторы",
+          "query": {
+            "must": [
+              "Simulation Game"
+            ],
+            "sort": "votes"
+          }
+        },
+        {
+          "id": "dating",
+          "title": "Dating sim",
+          "query": {
+            "must": [
+              "Dating Simulation"
+            ],
+            "sort": "votes"
+          }
+        },
+        {
+          "id": "puzzle",
+          "title": "Головоломки",
+          "query": {
+            "must": [
+              "Puzzle Game"
+            ],
+            "sort": "votes"
+          }
+        }
       ]
     },
     {
       "id": "adult",
-      "title": "18+",
+      "title": "Для взрослых",
       "adult": true,
       "shelves": [
-        { "id": "story-ero", "title": "Сюжет + 18+", "adult": true, "query": { "must": ["Sexual Content"], "exclude": ["Nukige"], "min_votes": 50, "sort": "rating" } },
-        { "id": "nukige", "title": "Нукиге", "adult": true, "query": { "must": ["Nukige"], "sort": "votes" } },
-        { "id": "ntr", "title": "NTR", "adult": true, "query": { "must": ["Netorare"], "sort": "votes" } },
-        { "id": "yuri-ero", "title": "Юри 18+", "adult": true, "query": { "must": ["Lesbian Sex"], "sort": "votes" } },
-        { "id": "yaoi-ero", "title": "Яой 18+", "adult": true, "query": { "must": ["Male on Male Sex"], "sort": "votes" } },
-        { "id": "monsters", "title": "Монстры", "adult": true, "query": { "must": ["Sex With Monsters"], "sort": "votes" } },
-        { "id": "femdom", "title": "Фемдом", "adult": true, "query": { "must": ["Female Domination"], "sort": "votes" } },
-        { "id": "bdsm", "title": "BDSM", "adult": true, "query": { "must": ["BDSM"], "sort": "votes" } },
-        { "id": "corruption", "title": "Развращение", "adult": true, "query": { "must": ["Sexual Corruption"], "sort": "votes" } },
-        { "id": "no-ero", "title": "Без 18+ сцен", "query": { "must": ["No Sexual Content"], "sort": "votes" } }
+        {
+          "id": "story-ero",
+          "title": "С сильным сюжетом",
+          "adult": true,
+          "query": {
+            "must": [
+              "Sexual Content"
+            ],
+            "exclude": [
+              "Nukige"
+            ],
+            "min_votes": 50,
+            "sort": "rating"
+          }
+        },
+        {
+          "id": "nukige",
+          "title": "Нукиге",
+          "adult": true,
+          "query": {
+            "must": [
+              "Nukige"
+            ],
+            "sort": "votes"
+          }
+        },
+        {
+          "id": "ntr",
+          "title": "NTR",
+          "adult": true,
+          "query": {
+            "must": [
+              "Netorare"
+            ],
+            "sort": "votes"
+          }
+        },
+        {
+          "id": "yuri-ero",
+          "title": "Юри",
+          "adult": true,
+          "query": {
+            "must": [
+              "Lesbian Sex"
+            ],
+            "sort": "votes"
+          }
+        },
+        {
+          "id": "yaoi-ero",
+          "title": "Яой",
+          "adult": true,
+          "query": {
+            "must": [
+              "Male on Male Sex"
+            ],
+            "sort": "votes"
+          }
+        },
+        {
+          "id": "monsters",
+          "title": "Монстры",
+          "adult": true,
+          "query": {
+            "must": [
+              "Sex With Monsters"
+            ],
+            "sort": "votes"
+          }
+        },
+        {
+          "id": "femdom",
+          "title": "Фемдом",
+          "adult": true,
+          "query": {
+            "must": [
+              "Female Domination"
+            ],
+            "sort": "votes"
+          }
+        },
+        {
+          "id": "bdsm",
+          "title": "BDSM",
+          "adult": true,
+          "query": {
+            "must": [
+              "BDSM"
+            ],
+            "sort": "votes"
+          }
+        },
+        {
+          "id": "corruption",
+          "title": "Развращение",
+          "adult": true,
+          "query": {
+            "must": [
+              "Sexual Corruption"
+            ],
+            "sort": "votes"
+          }
+        }
       ]
     }
   ]

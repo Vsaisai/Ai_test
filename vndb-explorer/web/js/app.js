@@ -47,9 +47,9 @@ async function route() {
     case undefined: return viewHome(target);
     case 'shelf': return viewShelf(target, parts[1], params);
     case 'search': return viewSearch(target, params);
-    case 'tags': return viewTags(target, parts[1], params);
+    case 'tags': return viewTags(target, parts.slice(1), params);
     case 'tag': return viewTag(target, parts[1]);
-    case 'vn': return viewVn(target, parts[1]);
+    case 'vn': return viewVn(target, parts[1], params);
     case 'my': return viewMy(target, parts[1]);
     case 'settings': return viewSettings(target);
     default: view.append(h('p', {}, 'Страница не найдена. ', h('a', { href: '#/' }, 'На главную')));

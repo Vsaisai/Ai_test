@@ -13,7 +13,8 @@ export const DEFAULTS = {
   langs: 'en',            // preferred languages, comma separated, in order
   langMode: 'readable',   // readable | list | any
   allowMtl: true,         // count machine translations
-  adult: true,            // show 18+ shelves, tags and VNs
+  adultTags: false,       // adult tags in the catalog, search and VN pages (+ their shelves)
+  hideAdult: false,       // hide VNs with sexual content from lists
   blur: 'explicit',       // off | explicit | suggestive  (blur covers & screenshots)
   spoiler: 0,             // 0 none, 1 minor, 2 all
   theme: 'auto',          // auto | dark | light
@@ -53,7 +54,7 @@ export function baseRequest() {
     lang_mode: s.langMode,
     langs: langList().length ? langList() : ['en'],
     allow_mtl: s.allowMtl,
-    ero: s.adult ? 'show' : 'hide',
+    ero: s.hideAdult ? 'hide' : 'show',
     spoiler: Number(s.spoiler) || 0,
     hide_cancelled: s.hideCancelled,
   };
