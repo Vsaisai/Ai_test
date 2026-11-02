@@ -1,0 +1,58 @@
+plugins {
+    id 'com.android.application'
+}
+
+// Version comes from the git tag in CI (mobile-v1.2.3 -> 1.2.3), see mobile/build-apk.sh
+def appVersion = System.getenv('VNSHELF_VERSION') ?: '0.3.0'
+def parts = appVersion.tokenize('.').collect { it.replaceAll('[^0-9]', '') ?: '0' }.collect { it as int }
+def code = parts[0] * 10000 + (parts.size() > 1 ? parts[1] : 0) * 100 + (parts.size() > 2 ? parts[2] : 0)
+
+android {
+    namespace 'ru.vnshelf.app'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'ru.vnshelf.app'
+        minSdk 24
+        targetSdk 35
+        versionCode code
+        versionName appVersion
+    }
+
+    signingConfigs {
+        release {
+            // Real releases: provide a keystore through the environment (GitHub secrets).
+            // Otherwise the committed debug keystore is used so that updates install over each other.
+            def ks = System.getenv('VNSHELF_KEYSTORE')
+            storeFile file(ks ?: 'debug.keystore')
+            storePassword System.getenv('VNSHELF_KEYSTORE_PASSWORD') ?: 'android'
+            keyAlias System.getenv('VNSHELF_KEY_ALIAS') ?: 'androiddebugkey'
+            keyPassword System.getenv('VNSHELF_KEY_PASSWORD') ?: 'android'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.release
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    // Native library built by cargo-ndk (mobile/build-apk.sh)
+    sourceSets {
+        main {
+            jniLibs.srcDirs = ['src/main/jniLibs']
+        }
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true   // compressed .so: ~2x smaller download
+        }
+    }
+}

@@ -135,6 +135,7 @@ pub fn open_user(path: &Path) -> Result<Connection> {
         CREATE TABLE IF NOT EXISTS marks(vid INTEGER PRIMARY KEY, status TEXT NOT NULL, note TEXT, updated TEXT DEFAULT (datetime('now')));
         CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
         CREATE TABLE IF NOT EXISTS source_index(source TEXT NOT NULL, key TEXT NOT NULL, url TEXT NOT NULL, PRIMARY KEY(source, key));
+        CREATE TABLE IF NOT EXISTS translations(src TEXT NOT NULL, lang TEXT NOT NULL, dst TEXT NOT NULL, PRIMARY KEY(src, lang));
         CREATE TABLE IF NOT EXISTS source_meta(source TEXT PRIMARY KEY, fetched_at TEXT, entries INTEGER);
         ",
     )?;

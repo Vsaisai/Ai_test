@@ -22,6 +22,7 @@ pub mod shelves;
 pub mod sources;
 pub mod sync;
 pub mod tagtree;
+pub mod translate;
 
 pub use catalog::Catalog;
 pub use search::{search, SearchRequest, SearchResponse};

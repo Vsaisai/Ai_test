@@ -60,6 +60,8 @@ pub struct Catalog {
     pub imported_at: String,
     /// Tag ids under "Sexual Content" or with cat = ero.
     pub ero_tag_root: Option<u32>,
+    /// Tag -> itself and all ancestors (for counting tags together with their sub-tags).
+    pub ancestors: HashMap<u32, Vec<u32>>,
 }
 
 impl Vn {
@@ -298,6 +300,7 @@ impl Catalog {
             dump_timestamp,
             imported_at,
             ero_tag_root,
+            ancestors: ancestors_cache,
         })
     }
 

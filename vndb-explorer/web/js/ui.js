@@ -42,6 +42,15 @@ export function langBadges(langs, max = 4) {
   return wrap;
 }
 
+/** Legend for language badges, one line per style. With `langs`, only the styles present are listed. */
+export function langLegend(langs = null) {
+  const rows = [[0, 'официальный перевод или оригинал'], [1, 'фанатский перевод'], [2, 'машинный перевод']]
+    .filter(([k]) => !langs || langs.some(l => l.kind === k));
+  if (!rows.length) return null;
+  return h('ul', { class: 'lang-legend' }, rows.map(([k, text]) =>
+    h('li', {}, h('span', { class: `lang k${k}` }, 'EN'), h('span', { class: 'muted small' }, `— ${text}`))));
+}
+
 export function fmtLength(min) {
   if (!min) return '';
   if (min < 60) return `${min} мин`;
@@ -56,16 +65,25 @@ export function shouldBlur(sexual) {
   return sexual > 130;
 }
 
-export function cover(path, sexual = 0, alt = '', cls = 'cover') {
+/**
+ * Picture with optional sharper source: VNDB thumbnails are small (covers ≤256 px, screenshots
+ * ≈136 px), so on large or high-density screens the browser picks `full` through srcset.
+ * opts: { full, sizes, thumbW, fullW }
+ */
+export function cover(path, sexual = 0, alt = '', cls = 'cover', opts = {}) {
   if (!path) return h('div', { class: `${cls} nocover` }, h('span', {}, 'нет обложки'));
-  const im = h('img', { src: img(path), alt, loading: 'lazy', decoding: 'async' });
-  const box = h('div', { class: cls }, im);
+  const attrs = { src: img(path), alt, loading: 'lazy', decoding: 'async' };
+  if (opts.full && opts.full !== path) {
+    attrs.srcset = `${img(path)} ${opts.thumbW || 256}w, ${img(opts.full)} ${opts.fullW || 800}w`;
+    attrs.sizes = opts.sizes || '(max-width: 760px) 120px, 150px';
+  }
+  const box = h('div', { class: cls }, h('img', attrs));
   if (shouldBlur(sexual)) {
     box.classList.add('blurred');
     box.append(h('button', {
-      class: 'reveal', type: 'button', title: 'Показать',
+      class: 'reveal', type: 'button', title: 'Показать изображение', 'aria-label': 'Показать изображение',
       onclick: e => { e.preventDefault(); e.stopPropagation(); box.classList.remove('blurred'); e.currentTarget.remove(); },
-    }, '18+'));
+    }, 'Показать'));
   }
   return box;
 }
@@ -88,11 +106,11 @@ export function card(it, opts = {}) {
     badges.append(h('span', { class: `badge ${it.all_wanted ? 'full' : ''}`, title: 'Совпало желательных тегов' },
       `${it.matched.length}/${opts.wantCount}`));
   }
-  if (it.ero) badges.append(h('span', { class: 'badge ero' }, '18+'));
   if (it.freeware) badges.append(h('span', { class: 'badge free' }, 'free'));
   if (it.mark && MARKS[it.mark]) badges.append(h('span', { class: 'badge mark', title: MARKS[it.mark].label }, MARKS[it.mark].icon));
-  return h('a', { class: 'card', href: `#/vn/${it.id}`, title: it.original && it.original !== it.title ? `${it.title}\n${it.original}` : it.title },
-    h('div', { class: 'cover-wrap' }, cover(it.image, it.img_sexual, it.title), badges),
+  const href = `#/vn/${it.id}${opts.hl && opts.hl.length ? `?hl=${opts.hl.join(',')}` : ''}`;
+  return h('a', { class: 'card', href, title: it.original && it.original !== it.title ? `${it.title}\n${it.original}` : it.title },
+    h('div', { class: 'cover-wrap' }, cover(it.image, it.img_sexual, it.title, 'cover', { full: it.image_full, thumbW: 256, fullW: 600 }), badges),
     h('div', { class: 'card-title' }, it.title),
     h('div', { class: 'card-meta' }, meta),
     langBadges(it.langs, 3),
@@ -120,7 +138,6 @@ export function debounce(fn, ms = 250) {
   return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
 }
 
-export const ROOT_RU = { Theme: 'Тема', Character: 'Персонажи', Setting: 'Сеттинг', Plot: 'Сюжет', Style: 'Стиль' };
 
 // ---------- job progress (download / import / sync) ----------
 

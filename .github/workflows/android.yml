@@ -1,0 +1,93 @@
+name: Android APK
+
+# Every push to the `mobile` branch builds the APK. If the version in vndb-explorer/mobile/VERSION
+# has no release yet, a GitHub Release `mobile-v<version>` (and its tag) is created with the APK.
+# Bump VERSION to publish a new version. Pushing a `mobile-v*` tag works too.
+on:
+  push:
+    branches: [mobile]
+    tags: ['mobile-v*']
+    paths:
+      - 'vndb-explorer/**'
+      - '.github/workflows/android.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: vndb-explorer
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Rust toolchain and Android targets
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+          cargo install cargo-ndk --locked
+
+      - name: Android SDK platform 35
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0" > /dev/null
+
+      - name: Version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/mobile-v* ]]; then
+            echo "VNSHELF_VERSION=${GITHUB_REF#refs/tags/mobile-v}" >> "$GITHUB_ENV"
+          else
+            echo "VNSHELF_VERSION=$(tr -d ' \n' < mobile/VERSION)" >> "$GITHUB_ENV"
+          fi
+
+      - name: Release signing key (optional, from secrets)
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KS_B64" ]; then
+            echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+            echo "VNSHELF_KEYSTORE=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
+            echo "Using the release keystore from secrets"
+          else
+            echo "No ANDROID_KEYSTORE_BASE64 secret: signing with the committed debug key"
+          fi
+
+      - name: Tests
+        run: cargo test -p vndb-core -p vndb-web
+
+      - name: Build APK
+        env:
+          VNSHELF_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          VNSHELF_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          VNSHELF_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          ./mobile/build-apk.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VNShelf-${{ env.VNSHELF_VERSION }}
+          path: vndb-explorer/target/apk/*.apk
+
+      - name: Publish release (new versions only)
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="mobile-v$VNSHELF_VERSION"
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "Release $TAG already exists: bump vndb-explorer/mobile/VERSION to publish a new one."
+            exit 0
+          fi
+          gh release create "$TAG" target/apk/*.apk \
+            --target "$GITHUB_SHA" \
+            --title "VN Shelf $VNSHELF_VERSION для Android" \
+            --notes-file mobile/RELEASE_NOTES.md

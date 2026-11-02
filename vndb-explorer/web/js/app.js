@@ -1,6 +1,7 @@
 // Entry point: navigation + hash router.
-import { applyTheme, settings, save } from './store.js';
+import { applyTheme, settings, save, IN_APP, APP_VERSION, RELEASES_API, RELEASES_PAGE } from './store.js';
 import { h, toast, jobPanel } from './ui.js';
+import { installTagTips } from './tagtip.js';
 import { api } from './api.js';
 import { viewHome, viewShelf, viewSearch, viewTags, viewTag, viewVn, viewMy, viewSettings } from './views.js';
 
@@ -47,9 +48,9 @@ async function route() {
     case undefined: return viewHome(target);
     case 'shelf': return viewShelf(target, parts[1], params);
     case 'search': return viewSearch(target, params);
-    case 'tags': return viewTags(target, parts[1], params);
+    case 'tags': return viewTags(target, parts.slice(1), params);
     case 'tag': return viewTag(target, parts[1]);
-    case 'vn': return viewVn(target, parts[1]);
+    case 'vn': return viewVn(target, parts[1], params);
     case 'my': return viewMy(target, parts[1]);
     case 'settings': return viewSettings(target);
     default: view.append(h('p', {}, 'Страница не найдена. ', h('a', { href: '#/' }, 'На главную')));
@@ -119,13 +120,93 @@ function reasonRu(c) {
   return `последняя полная загрузка ${Math.round(c.days_since_import)} дн. назад`;
 }
 
+// ---------- app updates (Android build only) ----------
+
+function newer(a, b) {
+  const pa = a.split('.').map(Number); const pb = b.split('.').map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) > (pb[i] || 0);
+  }
+  return false;
+}
+
+export async function checkAppUpdate({ interactive = false } = {}) {
+  if (!IN_APP) return null;
+  const s = settings();
+  if (!interactive && Date.now() - (s.lastAppCheck || 0) < 24 * 3600 * 1000) return null;
+  try {
+    const r = await fetch(RELEASES_API, { headers: { Accept: 'application/vnd.github+json' } });
+    if (r.status === 404) {
+      // private repository: the API needs a login, the releases page in the browser works
+      if (interactive) showBanner('Версию не проверить автоматически (репозиторий закрыт). Откройте страницу релизов:', [h('a', { class: 'btn primary', href: RELEASES_PAGE }, 'Релизы на GitHub')]);
+      return null;
+    }
+    if (!r.ok) throw new Error(`GitHub: HTTP ${r.status}`);
+    const list = await r.json();
+    save({ lastAppCheck: Date.now() });
+    const rel = list.find(x => !x.draft && !x.prerelease && /^mobile-v/.test(x.tag_name));
+    if (!rel) { if (interactive) toast('Релизов приложения пока нет'); return null; }
+    const ver = rel.tag_name.replace(/^mobile-v/, '');
+    const apk = (rel.assets || []).find(a => a.name.endsWith('.apk'));
+    if (newer(ver, APP_VERSION) && apk) {
+      const size = apk.size ? ` (${(apk.size / 1048576).toFixed(1).replace('.', ',')} МБ)` : '';
+      const canSelf = !!(window.VNShelfNative && window.VNShelfNative.startUpdate);
+      showBanner(`Вышла новая версия приложения ${ver} (у вас ${APP_VERSION}).`, [
+        canSelf
+          ? h('button', { class: 'btn primary', onclick: () => selfUpdate(apk.browser_download_url, ver) }, `Обновить${size}`)
+          : h('a', { class: 'btn primary', href: apk.browser_download_url }, `Скачать APK${size}`),
+        h('a', { class: 'btn', href: rel.html_url }, 'Что нового')]);
+    } else if (interactive) {
+      toast(`Установлена последняя версия (${APP_VERSION})`);
+    }
+    return rel;
+  } catch (e) {
+    if (interactive) toast(e.message);
+    return null;
+  }
+}
+
+/** Download the new APK inside the app and hand it to the system installer (like Telegram). */
+function selfUpdate(url, ver) {
+  const res = window.VNShelfNative.startUpdate(url);
+  if (res === 'need_permission') {
+    showBanner('Разрешите приложению устанавливать обновления (откроются настройки Android), затем нажмите «Обновить» ещё раз.',
+      [h('button', { class: 'btn primary', onclick: () => selfUpdate(url, ver) }, 'Обновить')]);
+    return;
+  }
+  const poll = () => {
+    let st = {};
+    try { st = JSON.parse(window.VNShelfNative.updateStatus() || '{}'); } catch { /* ignore */ }
+    if (st.state === 'downloading') {
+      const pct = st.total ? Math.floor(st.done * 100 / st.total) : null;
+      const mb = b => (b / 1048576).toFixed(1).replace('.', ',');
+      showBanner(h('div', { class: 'job compact' },
+        h('div', { class: 'job-head' }, h('b', {}, pct !== null ? `${pct}%` : '…'), h('span', {}, ` Загружаю версию ${ver}${st.total ? ` · ${mb(st.done)} из ${mb(st.total)} МБ` : ''}`)),
+        h('div', { class: `bar ${pct === null ? 'indet' : ''}` }, h('i', { style: pct === null ? {} : { width: `${pct}%` } }))));
+      setTimeout(poll, 400);
+    } else if (st.state === 'installing') {
+      showBanner(`Подтвердите установку версии ${ver} в системном окне.`);
+      setTimeout(poll, 1000);
+    } else if (st.state === 'error') {
+      showBanner(`⚠️ Не удалось обновить: ${st.error || 'ошибка'}`, [h('button', { class: 'btn', onclick: () => selfUpdate(url, ver) }, 'Повторить')]);
+    } else if (st.state === 'done') {
+      showBanner('Обновление установлено — приложение перезапустится.');
+    } else {
+      setTimeout(poll, 500);
+    }
+  };
+  poll();
+}
+
 applyTheme();
 buildNav();
+installTagTips();
 window.addEventListener('hashchange', route);
 route();
 setTimeout(() => checkUpdates(), 1500);
 // a job may already be running (e.g. the app was reopened during a download)
 api.status().then(st => { if (st.ready && st.import?.running) watchJob('✅ Готово.'); }).catch(() => {});
+setTimeout(() => checkAppUpdate(), 4000);
 
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   navigator.serviceWorker.register('sw.js').catch(() => {});

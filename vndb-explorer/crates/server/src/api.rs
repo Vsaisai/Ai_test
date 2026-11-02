@@ -261,6 +261,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/updates", get(updates))
         .route("/api/sync", post(sync))
         .route("/api/sources", get(sources_info))
+        .route("/api/translate", post(translate))
         .route("/api/sources/refresh", post(sources_refresh))
         .route("/api/tags", get(tags))
         .route("/api/tags/:id", get(tag_detail))
@@ -424,7 +425,8 @@ async fn import(State(s): St, body: Option<Json<ImportReq>>) -> Json<Value> {
 
 #[derive(Deserialize)]
 struct UpdatesQ {
-    force: Option<bool>,
+    /// "1" / "true" force a fresh check (anything else uses the 6-hour cache)
+    force: Option<String>,
 }
 
 /// How far behind VNDB the local database is (needs internet; cached for 6 hours).
@@ -432,7 +434,8 @@ async fn updates(State(s): St, Query(q): Query<UpdatesQ>) -> ApiResult<Value> {
     if !s.ready() {
         return Ok(Json(json!({ "ready": false })));
     }
-    if !q.force.unwrap_or(false) {
+    let force = matches!(q.force.as_deref(), Some("1" | "true" | "yes"));
+    if !force {
         if let Some((at, v)) = s.updates.lock().unwrap().clone() {
             if at.elapsed() < std::time::Duration::from_secs(6 * 3600) {
                 return Ok(Json(v));
@@ -482,6 +485,35 @@ async fn sources_info(State(s): St) -> ApiResult<Value> {
         })
         .collect();
     Ok(Json(json!({ "sources": list })))
+}
+
+#[derive(Deserialize)]
+struct TranslateReq {
+    texts: Vec<String>,
+    #[serde(default = "default_lang")]
+    to: String,
+}
+
+fn default_lang() -> String {
+    "ru".into()
+}
+
+/// Machine translation (Google, MyMemory fallback), cached in user.sqlite. Needs internet
+/// for texts that were never translated before.
+async fn translate(State(s): St, Json(req): Json<TranslateReq>) -> ApiResult<Value> {
+    if req.texts.len() > 400 || req.texts.iter().map(|t| t.len()).sum::<usize>() > 60_000 {
+        return Err(ApiError(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "too much text".into(),
+        ));
+    }
+    let path = s.data_dir.join("user.sqlite");
+    let out = blocking(move || {
+        let conn = vndb_core::db::open_user(&path)?;
+        Ok(vndb_core::translate::translate(&conn, &req.texts, &req.to)?)
+    })
+    .await?;
+    Ok(Json(json!({ "translations": out })))
 }
 
 async fn sources_refresh(State(s): St) -> Json<Value> {

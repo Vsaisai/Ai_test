@@ -7,7 +7,10 @@
       "kind": "community",
       "description": "Каталог визуальных новелл на русском: переводы, загрузки",
       "search": "https://vngames.ru/novels/search/?q={q}",
-      "index": { "sitemap": "https://vngames.ru/sitemap.xml", "prefix": "https://vngames.ru/novels/detail/" }
+      "index": {
+        "sitemap": "https://vngames.ru/sitemap.xml",
+        "prefix": "https://vngames.ru/novels/detail/"
+      }
     },
     {
       "id": "anivisual",
@@ -23,12 +26,36 @@
       "lang": "en",
       "kind": "community",
       "adult": true,
-      "description": "Англоязычное сообщество (18+)",
+      "description": "Англоязычное сообщество: переводы, патчи, обсуждения",
       "search": "https://f95zone.to/search/?q={q}&t=post&c[title_only]=1"
     },
-    { "id": "itch", "name": "itch.io", "lang": "en", "kind": "store_search", "search": "https://itch.io/search?q={q}" },
-    { "id": "steam", "name": "Steam", "lang": "en", "kind": "store_search", "search": "https://store.steampowered.com/search/?term={q}" },
-    { "id": "gog", "name": "GOG", "lang": "en", "kind": "store_search", "search": "https://www.gog.com/en/games?query={q}" },
-    { "id": "dlsite", "name": "DLsite", "lang": "en", "kind": "store_search", "search": "https://www.dlsite.com/home/fsr/=/keyword/{q}" }
+    {
+      "id": "itch",
+      "name": "itch.io",
+      "lang": "en",
+      "kind": "store_search",
+      "search": "https://itch.io/search?q={q}"
+    },
+    {
+      "id": "steam",
+      "name": "Steam",
+      "lang": "en",
+      "kind": "store_search",
+      "search": "https://store.steampowered.com/search/?term={q}"
+    },
+    {
+      "id": "gog",
+      "name": "GOG",
+      "lang": "en",
+      "kind": "store_search",
+      "search": "https://www.gog.com/en/games?query={q}"
+    },
+    {
+      "id": "dlsite",
+      "name": "DLsite",
+      "lang": "en",
+      "kind": "store_search",
+      "search": "https://www.dlsite.com/home/fsr/=/keyword/{q}"
+    }
   ]
 }
