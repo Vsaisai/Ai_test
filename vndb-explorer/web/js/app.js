@@ -1,5 +1,5 @@
 // Entry point: navigation + hash router.
-import { applyTheme, settings, save, IN_APP, APP_VERSION, RELEASES_API, RELEASES_PAGE } from './store.js';
+import { applyTheme, settings, save, IN_APP, APP_VERSION, RELEASES_PAGE } from './store.js';
 import { h, toast, jobPanel } from './ui.js';
 import { installTagTips } from './tagtip.js';
 import { api } from './api.js';
@@ -135,31 +135,33 @@ export async function checkAppUpdate({ interactive = false } = {}) {
   const s = settings();
   if (!interactive && Date.now() - (s.lastAppCheck || 0) < 24 * 3600 * 1000) return null;
   try {
-    const r = await fetch(RELEASES_API, { headers: { Accept: 'application/vnd.github+json' } });
-    if (r.status === 404) {
-      // private repository: the API needs a login, the releases page in the browser works
-      if (interactive) showBanner('Версию не проверить автоматически (репозиторий закрыт). Откройте страницу релизов:', [h('a', { class: 'btn primary', href: RELEASES_PAGE }, 'Релизы на GitHub')]);
+    const u = await api.appUpdate();
+    if (u.status === 'private' || u.status === 'bad_token') {
+      if (interactive) {
+        showBanner(u.status === 'private'
+          ? 'Репозиторий закрыт: чтобы приложение видело новые версии, вставьте токен GitHub в «Настройки → Приложение».'
+          : 'GitHub не принял токен (истёк или нет доступа к репозиторию). Обновите его в «Настройки → Приложение».',
+        [h('a', { class: 'btn primary', href: '#/settings' }, 'Открыть настройки'), h('a', { class: 'btn', href: RELEASES_PAGE }, 'Релизы на GitHub')]);
+      }
       return null;
     }
-    if (!r.ok) throw new Error(`GitHub: HTTP ${r.status}`);
-    const list = await r.json();
     save({ lastAppCheck: Date.now() });
-    const rel = list.find(x => !x.draft && !x.prerelease && /^mobile-v/.test(x.tag_name));
-    if (!rel) { if (interactive) toast('Релизов приложения пока нет'); return null; }
-    const ver = rel.tag_name.replace(/^mobile-v/, '');
-    const apk = (rel.assets || []).find(a => a.name.endsWith('.apk'));
-    if (newer(ver, APP_VERSION) && apk) {
-      const size = apk.size ? ` (${(apk.size / 1048576).toFixed(1).replace('.', ',')} МБ)` : '';
+    if (!u.version) { if (interactive) toast('Релизов приложения пока нет'); return null; }
+    const ver = u.version;
+    if (newer(ver, APP_VERSION) && u.asset_id) {
+      const size = u.size ? ` (${(u.size / 1048576).toFixed(1).replace('.', ',')} МБ)` : '';
       const canSelf = !!(window.VNShelfNative && window.VNShelfNative.startUpdate);
+      // the APK comes through the local server, which adds the token for a private repository
+      const local = `${location.origin}/api/app-update/apk?id=${u.asset_id}`;
       showBanner(`Вышла новая версия приложения ${ver} (у вас ${APP_VERSION}).`, [
         canSelf
-          ? h('button', { class: 'btn primary', onclick: () => selfUpdate(apk.browser_download_url, ver) }, `Обновить${size}`)
-          : h('a', { class: 'btn primary', href: apk.browser_download_url }, `Скачать APK${size}`),
-        h('a', { class: 'btn', href: rel.html_url }, 'Что нового')]);
+          ? h('button', { class: 'btn primary', onclick: () => selfUpdate(local, ver) }, `Обновить${size}`)
+          : h('a', { class: 'btn primary', href: u.public_url || RELEASES_PAGE }, `Скачать APK${size}`),
+        h('a', { class: 'btn', href: u.html_url || RELEASES_PAGE }, 'Что нового')]);
     } else if (interactive) {
       toast(`Установлена последняя версия (${APP_VERSION})`);
     }
-    return rel;
+    return u;
   } catch (e) {
     if (interactive) toast(e.message);
     return null;

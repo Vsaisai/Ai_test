@@ -1,5 +1,5 @@
 // Service worker: app shell works offline, cover images are cached, API always goes to the server.
-const SHELL = 'vnshelf-shell-v6';
+const SHELL = 'vnshelf-shell-v7';
 const IMAGES = 'vnshelf-img-v1';
 const FILES = ['./', 'index.html', 'app.css', 'js/app.js', 'js/api.js', 'js/ui.js', 'js/store.js', 'js/views.js', 'js/taxonomy.js', 'js/lightbox.js', 'js/tagtip.js',
   'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png'];

@@ -262,6 +262,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/sync", post(sync))
         .route("/api/sources", get(sources_info))
         .route("/api/translate", post(translate))
+        .route("/api/app-update", get(app_update))
+        .route("/api/app-update/apk", get(app_update_apk))
+        .route("/api/app-update/token", put(set_update_token))
         .route("/api/sources/refresh", post(sources_refresh))
         .route("/api/tags", get(tags))
         .route("/api/tags/:id", get(tag_detail))
@@ -520,6 +523,123 @@ async fn sources_refresh(State(s): St) -> Json<Value> {
     Json(json!({ "started": start_sources_refresh(s) }))
 }
 
+// ---------- app updates (GitHub releases, also from a private repository) ----------
+
+const RELEASES_REPO: &str = "Vsaisai/Ai_test";
+/// Read-only token baked into the Android build (CI secret `VNSHELF_UPDATE_TOKEN`), so the app
+/// can see releases of a private repository. A token saved in the settings wins.
+const BUILD_TOKEN: Option<&str> = option_env!("VNSHELF_UPDATE_TOKEN");
+
+fn update_token(s: &AppState) -> Option<String> {
+    std::fs::read_to_string(s.data_dir.join("github_token"))
+        .ok()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .or_else(|| BUILD_TOKEN.map(str::trim).filter(|t| !t.is_empty()).map(String::from))
+}
+
+fn github(s: &AppState, url: &str, accept: &str) -> reqwest::RequestBuilder {
+    let mut rb = s
+        .http
+        .get(url)
+        .header("Accept", accept)
+        .header("X-GitHub-Api-Version", "2022-11-28");
+    if let Some(t) = update_token(s) {
+        rb = rb.bearer_auth(t);
+    }
+    rb
+}
+
+/// Latest `mobile-v*` release: {status: ok|private|bad_token|error, version, size, asset_id, html_url}.
+async fn app_update(State(s): St) -> ApiResult<Value> {
+    let url = format!("https://api.github.com/repos/{RELEASES_REPO}/releases?per_page=20");
+    let has_token = update_token(&s).is_some();
+    let resp = github(&s, &url, "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, format!("GitHub: {e}")))?;
+    let code = resp.status().as_u16();
+    if code == 404 || code == 401 || code == 403 {
+        let status = if has_token { "bad_token" } else { "private" };
+        return Ok(Json(json!({ "status": status, "http": code, "has_token": has_token })));
+    }
+    if !resp.status().is_success() {
+        return Err(ApiError(StatusCode::BAD_GATEWAY, format!("GitHub: HTTP {code}")));
+    }
+    let list: Vec<Value> = resp
+        .json()
+        .await
+        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, format!("GitHub: {e}")))?;
+    let rel = list.iter().find(|r| {
+        !r["draft"].as_bool().unwrap_or(false)
+            && !r["prerelease"].as_bool().unwrap_or(false)
+            && r["tag_name"].as_str().is_some_and(|t| t.starts_with("mobile-v"))
+    });
+    let Some(rel) = rel else {
+        return Ok(Json(json!({ "status": "ok", "has_token": has_token, "version": null })));
+    };
+    let apk = rel["assets"].as_array().and_then(|a| {
+        a.iter().find(|x| x["name"].as_str().is_some_and(|n| n.ends_with(".apk")))
+    });
+    Ok(Json(json!({
+        "status": "ok",
+        "has_token": has_token,
+        "version": rel["tag_name"].as_str().unwrap_or("").trim_start_matches("mobile-v"),
+        "html_url": rel["html_url"],
+        "notes": rel["body"],
+        "asset_id": apk.map(|a| a["id"].clone()),
+        "size": apk.map(|a| a["size"].clone()),
+        "public_url": apk.map(|a| a["browser_download_url"].clone()),
+    })))
+}
+
+#[derive(Deserialize)]
+struct ApkQ {
+    id: u64,
+}
+
+/// Stream a release asset through the local server (the token never leaves it). GitHub answers
+/// with a redirect to a signed download URL; reqwest drops the Authorization header there.
+async fn app_update_apk(State(s): St, Query(q): Query<ApkQ>) -> Response {
+    let url = format!("https://api.github.com/repos/{RELEASES_REPO}/releases/assets/{}", q.id);
+    let resp = match github(&s, &url, "application/octet-stream")
+        .timeout(std::time::Duration::from_secs(3600))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
+    };
+    if !resp.status().is_success() {
+        let code = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+        return (code, format!("GitHub: HTTP {}", resp.status().as_u16())).into_response();
+    }
+    let mut r = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/vnd.android.package-archive");
+    if let Some(len) = resp.content_length() {
+        r = r.header(header::CONTENT_LENGTH, len);
+    }
+    r.body(Body::from_stream(resp.bytes_stream()))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+#[derive(Deserialize)]
+struct TokenReq {
+    token: String,
+}
+
+async fn set_update_token(State(s): St, Json(req): Json<TokenReq>) -> ApiResult<Value> {
+    let path = s.data_dir.join("github_token");
+    let t = req.token.trim();
+    if t.is_empty() {
+        let _ = std::fs::remove_file(&path);
+    } else {
+        std::fs::write(&path, t).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+    Ok(Json(json!({ "saved": !t.is_empty(), "has_token": update_token(&s).is_some() })))
+}
+
 // ---------- tags ----------
 
 #[derive(Serialize)]
@@ -570,10 +690,11 @@ async fn tag_detail(State(s): St, Path(id): Path<String>) -> ApiResult<Value> {
             r.get(0)
         })
         .unwrap_or_default();
+    let d = vndb_core::detail::tag_description(&desc);
     Ok(Json(json!({
         "id": id, "name": t.name, "cat": t.cat, "aliases": t.aliases, "vns": t.vns,
         "path": c.tree.path(id), "path_names": c.tree.path_names(id), "children": t.children,
-        "description": vndb_core::detail::clean_bbcode(&desc),
+        "description": d.text, "parts": d.parts, "examples": d.examples,
     })))
 }
 

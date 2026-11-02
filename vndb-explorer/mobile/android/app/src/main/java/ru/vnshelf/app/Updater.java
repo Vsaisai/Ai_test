@@ -48,7 +48,8 @@ public final class Updater {
         if ("downloading".equals(state) || "installing".equals(state)) {
             return "busy";
         }
-        if (url == null || !url.startsWith("https://")) {
+        // the local server (127.0.0.1) proxies GitHub and adds the token for a private repository
+        if (url == null || !(url.startsWith("https://") || url.startsWith("http://127.0.0.1:"))) {
             state = "error";
             error = "bad url";
             return "ok";
@@ -73,11 +74,11 @@ public final class Updater {
             HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
             c.setInstanceFollowRedirects(true);
             c.setConnectTimeout(15000);
-            c.setReadTimeout(30000);
+            c.setReadTimeout(120000);
             c.setRequestProperty("Accept", "application/octet-stream");
             int code = c.getResponseCode();
             if (code != 200) {
-                throw new IllegalStateException("HTTP " + code + (code == 404 ? " (репозиторий закрыт?)" : ""));
+                throw new IllegalStateException("HTTP " + code + (code == 404 ? " (нет доступа к релизам — проверьте токен в настройках)" : ""));
             }
             total = c.getContentLengthLong();
             PackageInstaller pi = ctx.getPackageManager().getPackageInstaller();

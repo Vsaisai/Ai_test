@@ -3,7 +3,7 @@ import { api, img } from './api.js';
 import { settings, save, baseRequest, DEFAULTS, IN_APP, APP_VERSION, PLATFORM_GROUPS } from './store.js';
 import {
   h, card, cover, spinner, errorBox, toast, debounce, langBadges, fmtLength,
-  LANG_NAMES, PLATFORMS, MARKS, jobPanel, langLegend,
+  LANG_NAMES, PLATFORMS, MARKS, jobPanel, langLegend, tagDescription,
 } from './ui.js';
 import { CURATED, ADULT, tagLabel, catRu, resolveGroup } from './taxonomy.js';
 import { openLightbox } from './lightbox.js';
@@ -572,7 +572,7 @@ export async function viewTag(root, id) {
           h('a', { class: 'btn', href: `#/search?want=${t.id}` }, '~ Желательно'),
           h('a', { class: 'btn', href: `#/search?must=${t.id}` }, '! Обязательно'),
           h('a', { class: 'btn', href: `#/search?exclude=${t.id}` }, '− Исключить'))),
-      t.description ? h('p', { class: 'desc' }, t.description) : null,
+      t.description || t.examples?.length ? tagDescription(t) : null,
       kids.length ? h('div', { class: 'subtags' }, h('span', { class: 'muted' }, 'Подтеги: '),
         kids.map(k => h('a', { class: 'pill', href: `#/tag/${k.id}` }, tagLabel(k), h('small', {}, ` ${k.vns}`)))) : null,
       h('h2', {}, 'Новеллы с этим тегом'),
@@ -581,6 +581,29 @@ export async function viewTag(root, id) {
   } catch (e) {
     mount(root, errorBox(e));
   }
+}
+
+function updateTokenField() {
+  const input = h('input', { type: 'password', placeholder: 'github_pat_…', autocomplete: 'off', spellcheck: 'false' });
+  const note = h('p', { class: 'muted small' }, 'Проверяю…');
+  const refresh = () => api.appUpdate().then(u => {
+    note.textContent = u.status === 'ok'
+      ? (u.has_token ? 'Доступ к релизам есть (токен работает).' : 'Доступ к релизам есть.')
+      : u.status === 'bad_token' ? 'Токен не подошёл: истёк или нет доступа к репозиторию.'
+        : 'Репозиторий закрыт: без токена приложение не видит новые версии.';
+  }).catch(e => { note.textContent = `Нет связи с GitHub: ${e.message}`; });
+  const saveTok = async val => {
+    try { await api.setUpdateToken(val); input.value = ''; toast(val ? 'Токен сохранён' : 'Токен удалён'); refresh(); } catch (e) { toast(e.message); }
+  };
+  refresh();
+  return h('div', { class: 'field' },
+    h('label', {}, 'Токен GitHub для обновлений'),
+    h('div', { class: 'row' }, input,
+      h('button', { class: 'btn', type: 'button', onclick: () => saveTok(input.value.trim()) }, 'Сохранить'),
+      h('button', { class: 'btn', type: 'button', onclick: () => saveTok('') }, 'Сбросить')),
+    note,
+    h('p', { class: 'muted small' }, 'Нужен, только пока репозиторий закрыт. GitHub → Settings → Developer settings → Fine-grained tokens: ' +
+      'доступ только к Vsaisai/Ai_test, право Contents: Read-only. Токен хранится только на этом устройстве.'));
 }
 
 // ---------- VN page ----------
@@ -981,6 +1004,7 @@ export async function viewSettings(root) {
     IN_APP
       ? h('section', { class: 'panel form' }, h('h2', {}, 'Приложение'),
         h('p', {}, `VN Shelf для Android, версия ${APP_VERSION}. Новые версии публикуются в GitHub Releases.`),
+        updateTokenField(),
         h('div', { class: 'toolbar' },
           h('button', { class: 'btn primary', onclick: async () => { const m = await import('./app.js'); m.checkAppUpdate({ interactive: true }); } }, 'Проверить обновление приложения'),
           reset))

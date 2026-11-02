@@ -100,3 +100,18 @@ Tauri 2 собирает Android/iOS и позволяет вызывать Rust
 `vndb-core` можно собрать как библиотеку (`crate-type = ["cdylib", "staticlib"]`) и подключить через
 UniFFI или `flutter_rust_bridge`. Модели (`SearchRequest`, `Card`, `Detail`) уже сериализуются в JSON,
 поэтому самый простой мост — функции «JSON на входе, JSON на выходе».
+
+## Обновления из закрытого репозитория
+
+Пока репозиторий приватный, GitHub не отдаёт список релизов без авторизации. Приложение проверяет версию и
+скачивает APK через свой локальный сервер, который добавляет токен (в WebView и JavaScript токен не попадает).
+
+1. GitHub → Settings → Developer settings → Fine-grained personal access tokens → Generate new token.
+   Repository access: только `Vsaisai/Ai_test`; Permissions → Contents: **Read-only**. Срок — по желанию.
+2. Repo → Settings → Secrets and variables → Actions → New repository secret `VNSHELF_UPDATE_TOKEN` с этим токеном.
+3. Следующие сборки APK получат токен при компиляции, и проверка обновлений заработает сама.
+
+Без секрета токен можно вставить вручную: «Настройки → Приложение → Токен GitHub для обновлений».
+Учтите: токен, встроенный в APK, можно извлечь из файла, поэтому давайте ему только чтение и только этот репозиторий.
+Когда репозиторий станет публичным, токен не нужен.
+

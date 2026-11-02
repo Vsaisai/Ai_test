@@ -34,6 +34,8 @@ export const api = {
   },
   startImport: () => call('POST', '/api/import', {}),
   updates: (force = false) => call('GET', `/api/updates${force ? '?force=true' : ''}`),
+  appUpdate: () => call('GET', '/api/app-update'),
+  setUpdateToken: token => call('PUT', '/api/app-update/token', { token }),
   translate: (texts, to = 'ru') => call('POST', '/api/translate', { texts, to }),
   sync: () => call('POST', '/api/sync', {}),
   sources: () => call('GET', '/api/sources'),
