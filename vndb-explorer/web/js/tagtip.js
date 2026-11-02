@@ -1,7 +1,7 @@
 // Long press (or right click) on any element with data-tag="<id>" shows what the tag means.
 // The card appears above the finger (or below if there is no room) so the finger does not cover it.
 import { api } from './api.js';
-import { h, tagDescription } from './ui.js';
+import { h, tagDescription, ruLabel } from './ui.js';
 import { settings } from './store.js';
 import { tagLabel, catRu } from './taxonomy.js';
 
@@ -64,8 +64,8 @@ async function show(id, x, y) {
     place(el, x, y);
   };
   body.replaceChildren(
-    h('div', { class: 'tagtip-title' }, label, label !== t.name ? h('span', { class: 'muted small' }, ` · ${t.name}`) : null),
-    h('div', { class: 'muted small' }, t.path_names.slice(0, -1).map(catRu).join(' › ') || '—', ` · ${t.vns} новелл`),
+    h('div', { class: 'tagtip-title' }, label === t.name ? ruLabel(t.name) : label, label !== t.name || settings().translate ? h('span', { class: 'muted small' }, ` · ${t.name}`) : null),
+    h('div', { class: 'muted small' }, t.path_names.slice(0, -1).flatMap((n, i) => i ? [' › ', ruLabel(n)] : [ruLabel(n)]), t.path_names.length > 1 ? '' : '—', ` · ${t.vns} новелл`),
     desc,
     h('div', { class: 'tagtip-actions' },
       original ? tr : null,

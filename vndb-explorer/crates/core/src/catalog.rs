@@ -125,7 +125,7 @@ pub fn format_date(d: u32) -> Option<String> {
         return None;
     }
     if d == 99999999 {
-        return Some("TBA".into());
+        return Some("дата неизвестна".into());
     }
     let (y, m, day) = (d / 10000, d / 100 % 100, d % 100);
     Some(if m == 99 || m == 0 {
@@ -337,7 +337,7 @@ mod tests {
         assert_eq!(format_date(20031017).unwrap(), "2003-10-17");
         assert_eq!(format_date(20039999).unwrap(), "2003");
         assert_eq!(format_date(20031099).unwrap(), "2003-10");
-        assert_eq!(format_date(99999999).unwrap(), "TBA");
+        assert_eq!(format_date(99999999).unwrap(), "дата неизвестна");
         assert_eq!(image_url("cv77859", false).unwrap(), "cv/59/77859.jpg");
         assert_eq!(image_url("cv77859", true).unwrap(), "cv.t/59/77859.jpg");
         assert_eq!(image_url("sf5707", true).unwrap(), "st/07/5707.jpg");

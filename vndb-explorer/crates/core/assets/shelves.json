@@ -337,7 +337,7 @@
         },
         {
           "id": "dating",
-          "title": "Dating sim",
+          "title": "Симулятор свиданий",
           "query": {
             "must": [
               "Dating Simulation"

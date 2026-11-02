@@ -2,7 +2,7 @@
 
 pub fn label(site: &str) -> &str {
     match site {
-        "website" => "Official website",
+        "website" => "Официальный сайт",
         "steam" => "Steam",
         "gog" => "GOG",
         "itch" | "itch_dev" => "Itch.io",
@@ -35,7 +35,7 @@ pub fn label(site: &str) -> &str {
         "melonjp" => "Melonbooks.co.jp",
         "animateg" => "Animate Games",
         "patreon" => "Patreon",
-        "patreonp" => "Patreon post",
+        "patreonp" => "Пост на Patreon",
         "substar" => "SubscribeStar",
         "booth" | "booth_pub" => "BOOTH",
         "gamejolt" => "Game Jolt",

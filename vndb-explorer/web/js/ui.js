@@ -1,5 +1,6 @@
 // Small DOM helpers and shared components.
-import { img } from './api.js';
+import { img, api } from './api.js';
+import { catRu } from './taxonomy.js';
 import { settings } from './store.js';
 
 export function h(tag, attrs = {}, ...children) {
@@ -196,15 +197,35 @@ export function jobPanel(job, { compact = false, link = null } = {}) {
     details);
 }
 
+/** Description parts from the server (text, links to tags / VNs / sites) -> DOM nodes.
+ *  `[spoiler]…[/spoiler]` markers may span several parts: everything inside is hidden until tapped. */
+export function richText(parts, { onNavigate } = {}) {
+  const out = [];
+  let spoiler = null;
+  const add = node => { if (spoiler) spoiler.append(node); else out.push(node); };
+  for (const x of parts || []) {
+    if (x.tag || x.vn || x.url) {
+      add(x.tag ? h('a', { href: `#/tag/${x.tag}`, onclick: onNavigate }, x.text)
+        : x.vn ? h('a', { href: `#/vn/${x.vn}`, onclick: onNavigate }, x.text)
+          : h('a', { href: x.url, target: '_blank', rel: 'noopener' }, x.text));
+      continue;
+    }
+    x.text.split(/(\[\/?spoiler\])/i).forEach(piece => {
+      if (/^\[spoiler\]$/i.test(piece)) {
+        if (!spoiler) { spoiler = h('span', { class: 'spoiler', title: 'Спойлер — нажмите', onclick: e => e.currentTarget.classList.add('shown') }); out.push(spoiler); }
+      } else if (/^\[\/spoiler\]$/i.test(piece)) {
+        spoiler = null;
+      } else if (piece) {
+        add(piece);
+      }
+    });
+  }
+  return out;
+}
+
 /** Tag description from /api/tags/:id: text with links to other tags, plus example screenshots. */
 export function tagDescription(t, { onNavigate, examples = true } = {}) {
-  const p = h('p', { class: 'desc' });
-  const parts = t.parts && t.parts.length ? t.parts : [{ text: t.description || '' }];
-  for (const x of parts) {
-    if (x.tag) p.append(h('a', { href: `#/tag/${x.tag}`, onclick: onNavigate }, x.text));
-    else if (x.url) p.append(h('a', { href: x.url, target: '_blank', rel: 'noopener' }, x.text));
-    else p.append(x.text);
-  }
+  const p = h('p', { class: 'desc' }, richText(t.parts && t.parts.length ? t.parts : [{ text: t.description || '' }], { onNavigate }));
   const s = settings();
   const shown = (t.examples || []).filter(e => !e.nsfw || s.adultTags);
   if (!examples || !shown.length) return p;
@@ -220,4 +241,50 @@ export function tagDescription(t, { onNavigate, examples = true } = {}) {
         } }, h('img', { src: im.src, alt: im.alt, loading: 'lazy', decoding: 'async' }));
     })));
   return h('div', {}, p, strip);
+}
+
+const nameCache = new Map();
+/** Russian names for VNDB tag / category names: curated first, machine translation (cached) for the rest.
+ *  Returns the input unchanged when translation is off or unavailable. */
+export async function ruNames(names) {
+  const out = names.map(n => (catRu(n) !== n ? catRu(n) : nameCache.get(n) || n));
+  if (!settings().translate) return names.map(n => catRu(n));
+  const todo = [...new Set(names.filter((n, i) => out[i] === n && /[A-Za-z]/.test(n)))];
+  if (todo.length) {
+    try {
+      const r = await api.translate(todo);
+      todo.forEach((n, i) => { if (r.translations[i]) nameCache.set(n, r.translations[i]); });
+    } catch { /* offline: keep English */ }
+  }
+  return names.map(n => (catRu(n) !== n ? catRu(n) : nameCache.get(n) || n));
+}
+
+let pending = new Map(); // name -> [elements]
+let flushTimer = null;
+/** A text node-like <span> with the Russian name of a tag/category; untranslated names are
+ *  machine-translated in one batched request and filled in when ready. */
+export function ruLabel(name) {
+  const el = h('span', {}, catRu(name));
+  if (catRu(name) !== name || !settings().translate || !/[A-Za-z]/.test(name)) return el;
+  if (nameCache.has(name)) { el.textContent = nameCache.get(name); el.title = name; return el; }
+  if (!pending.has(name)) pending.set(name, []);
+  pending.get(name).push(el);
+  clearTimeout(flushTimer);
+  flushTimer = setTimeout(async () => {
+    const batch = pending; pending = new Map();
+    const names = [...batch.keys()];
+    for (let i = 0; i < names.length; i += 150) {
+      const part = names.slice(i, i + 150);
+      try {
+        const r = await api.translate(part);
+        part.forEach((n, j) => {
+          const t = r.translations[j];
+          if (!t) return;
+          nameCache.set(n, t);
+          batch.get(n).forEach(e => { e.textContent = t; e.title = n; });
+        });
+      } catch { /* offline: keep English */ }
+    }
+  }, 40);
+  return el;
 }
