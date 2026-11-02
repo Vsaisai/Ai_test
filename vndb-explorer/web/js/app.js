@@ -139,7 +139,7 @@ export async function checkAppUpdate({ interactive = false } = {}) {
     if (u.status === 'private' || u.status === 'bad_token') {
       if (interactive) {
         showBanner(u.status === 'private'
-          ? 'Репозиторий закрыт: чтобы приложение видело новые версии, вставьте токен GitHub в «Настройки → Приложение».'
+          ? 'Не удалось найти релизы приложения на GitHub. Откройте страницу релизов:'
           : 'GitHub не принял токен (истёк или нет доступа к репозиторию). Обновите его в «Настройки → Приложение».',
         [h('a', { class: 'btn primary', href: '#/settings' }, 'Открыть настройки'), h('a', { class: 'btn', href: RELEASES_PAGE }, 'Релизы на GitHub')]);
       }
@@ -152,7 +152,7 @@ export async function checkAppUpdate({ interactive = false } = {}) {
       const size = u.size ? ` (${(u.size / 1048576).toFixed(1).replace('.', ',')} МБ)` : '';
       const canSelf = !!(window.VNShelfNative && window.VNShelfNative.startUpdate);
       // the APK comes through the local server, which adds the token for a private repository
-      const local = `${location.origin}/api/app-update/apk?id=${u.asset_id}`;
+      const local = `${location.origin}/api/app-update/apk?id=${u.asset_id}&repo=${u.repo || 'public'}`;
       showBanner(`Вышла новая версия приложения ${ver} (у вас ${APP_VERSION}).`, [
         canSelf
           ? h('button', { class: 'btn primary', onclick: () => selfUpdate(local, ver) }, `Обновить${size}`)

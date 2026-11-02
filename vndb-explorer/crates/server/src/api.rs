@@ -514,7 +514,10 @@ async fn translate(State(s): St, Json(req): Json<TranslateReq>) -> ApiResult<Val
     let out = blocking(move || {
         let conn = vndb_core::db::open_user(&path)?;
         vndb_core::translate::translate(&conn, &req.texts, &req.to).map_err(|e| {
-            ApiError(StatusCode::SERVICE_UNAVAILABLE, format!("переводчик недоступен: {e:#}"))
+            ApiError(
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("переводчик недоступен: {e:#}"),
+            )
         })
     })
     .await?;
@@ -525,11 +528,14 @@ async fn sources_refresh(State(s): St) -> Json<Value> {
     Json(json!({ "started": start_sources_refresh(s) }))
 }
 
-// ---------- app updates (GitHub releases, also from a private repository) ----------
+// ---------- app updates (GitHub releases) ----------
 
-const RELEASES_REPO: &str = "Vsaisai/Ai_test";
-/// Read-only token baked into the Android build (CI secret `VNSHELF_UPDATE_TOKEN`), so the app
-/// can see releases of a private repository. A token saved in the settings wins.
+/// Public repository with release builds only (no code): the app needs no token to update.
+const PUBLIC_RELEASES_REPO: &str = "Vsaisai/vnshelf-releases";
+/// The code repository (private): used only when a token is saved in the settings.
+const PRIVATE_RELEASES_REPO: &str = "Vsaisai/Ai_test";
+/// Optional token baked in by a personal build (env `VNSHELF_UPDATE_TOKEN`). Official CI builds
+/// do not set it, so a shared APK never carries a token.
 const BUILD_TOKEN: Option<&str> = option_env!("VNSHELF_UPDATE_TOKEN");
 
 fn update_token(s: &AppState) -> Option<String> {
@@ -537,55 +543,129 @@ fn update_token(s: &AppState) -> Option<String> {
         .ok()
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty())
-        .or_else(|| BUILD_TOKEN.map(str::trim).filter(|t| !t.is_empty()).map(String::from))
+        .or_else(|| {
+            BUILD_TOKEN
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(String::from)
+        })
 }
 
-fn github(s: &AppState, url: &str, accept: &str) -> reqwest::RequestBuilder {
+fn repo_of(public: bool) -> &'static str {
+    if public {
+        PUBLIC_RELEASES_REPO
+    } else {
+        PRIVATE_RELEASES_REPO
+    }
+}
+
+fn github(s: &AppState, url: &str, accept: &str, auth: bool) -> reqwest::RequestBuilder {
     let mut rb = s
         .http
         .get(url)
         .header("Accept", accept)
         .header("X-GitHub-Api-Version", "2022-11-28");
-    if let Some(t) = update_token(s) {
-        rb = rb.bearer_auth(t);
+    if auth {
+        if let Some(t) = update_token(s) {
+            rb = rb.bearer_auth(t);
+        }
     }
     rb
 }
 
-/// Latest `mobile-v*` release: {status: ok|private|bad_token|error, version, size, asset_id, html_url}.
-async fn app_update(State(s): St) -> ApiResult<Value> {
-    let url = format!("https://api.github.com/repos/{RELEASES_REPO}/releases?per_page=20");
-    let has_token = update_token(&s).is_some();
-    let resp = github(&s, &url, "application/vnd.github+json")
+/// Latest `mobile-v*` release of one repository: Ok(Some(release)), Ok(None) = no release,
+/// Err(http code) = no access.
+async fn latest_release(s: &AppState, public: bool) -> Result<Option<Value>, u16> {
+    let url = format!(
+        "https://api.github.com/repos/{}/releases?per_page=20",
+        repo_of(public)
+    );
+    let resp = github(s, &url, "application/vnd.github+json", !public)
         .send()
         .await
-        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, format!("GitHub: {e}")))?;
-    let code = resp.status().as_u16();
-    if code == 404 || code == 401 || code == 403 {
-        let status = if has_token { "bad_token" } else { "private" };
-        return Ok(Json(json!({ "status": status, "http": code, "has_token": has_token })));
-    }
+        .map_err(|_| 0u16)?;
     if !resp.status().is_success() {
-        return Err(ApiError(StatusCode::BAD_GATEWAY, format!("GitHub: HTTP {code}")));
+        return Err(resp.status().as_u16());
     }
-    let list: Vec<Value> = resp
-        .json()
-        .await
-        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, format!("GitHub: {e}")))?;
-    let rel = list.iter().find(|r| {
+    let list: Vec<Value> = resp.json().await.map_err(|_| 0u16)?;
+    Ok(list.into_iter().find(|r| {
         !r["draft"].as_bool().unwrap_or(false)
             && !r["prerelease"].as_bool().unwrap_or(false)
-            && r["tag_name"].as_str().is_some_and(|t| t.starts_with("mobile-v"))
-    });
-    let Some(rel) = rel else {
-        return Ok(Json(json!({ "status": "ok", "has_token": has_token, "version": null })));
+            && r["tag_name"]
+                .as_str()
+                .is_some_and(|t| t.starts_with("mobile-v"))
+    }))
+}
+
+fn version_of(r: &Value) -> Vec<u64> {
+    r["tag_name"]
+        .as_str()
+        .unwrap_or("")
+        .trim_start_matches("mobile-v")
+        .split('.')
+        .map(|x| x.parse().unwrap_or(0))
+        .collect()
+}
+
+/// Newest app release: {status: ok|private|bad_token, version, size, asset_id, repo, html_url}.
+/// The public releases repository needs no token; the private one is tried only with a token.
+async fn app_update(State(s): St) -> ApiResult<Value> {
+    let has_token = update_token(&s).is_some();
+    let public = latest_release(&s, true).await;
+    let private = if has_token {
+        Some(latest_release(&s, false).await)
+    } else {
+        None
+    };
+    let mut best: Option<(Value, bool)> = None;
+    for (r, is_pub) in [
+        (public.as_ref().ok().cloned().flatten(), true),
+        (
+            private
+                .as_ref()
+                .and_then(|p| p.as_ref().ok().cloned().flatten()),
+            false,
+        ),
+    ] {
+        if let Some(r) = r {
+            if best
+                .as_ref()
+                .is_none_or(|(b, _)| version_of(&r) > version_of(b))
+            {
+                best = Some((r, is_pub));
+            }
+        }
+    }
+    let Some((rel, is_pub)) = best else {
+        let public_ok = public.is_ok();
+        if public_ok {
+            return Ok(Json(
+                json!({ "status": "ok", "has_token": has_token, "version": null }),
+            ));
+        }
+        if let Some(Err(code)) = private {
+            if code != 0 {
+                return Ok(Json(
+                    json!({ "status": "bad_token", "http": code, "has_token": true }),
+                ));
+            }
+        }
+        if matches!(public, Err(0)) && !matches!(private, Some(Ok(_))) {
+            return Err(ApiError(
+                StatusCode::BAD_GATEWAY,
+                "нет связи с GitHub".into(),
+            ));
+        }
+        return Ok(Json(json!({ "status": "private", "has_token": has_token })));
     };
     let apk = rel["assets"].as_array().and_then(|a| {
-        a.iter().find(|x| x["name"].as_str().is_some_and(|n| n.ends_with(".apk")))
+        a.iter()
+            .find(|x| x["name"].as_str().is_some_and(|n| n.ends_with(".apk")))
     });
     Ok(Json(json!({
         "status": "ok",
         "has_token": has_token,
+        "repo": if is_pub { "public" } else { "private" },
         "version": rel["tag_name"].as_str().unwrap_or("").trim_start_matches("mobile-v"),
         "html_url": rel["html_url"],
         "notes": rel["body"],
@@ -598,13 +678,20 @@ async fn app_update(State(s): St) -> ApiResult<Value> {
 #[derive(Deserialize)]
 struct ApkQ {
     id: u64,
+    /// "public" (default) or "private"
+    repo: Option<String>,
 }
 
 /// Stream a release asset through the local server (the token never leaves it). GitHub answers
 /// with a redirect to a signed download URL; reqwest drops the Authorization header there.
 async fn app_update_apk(State(s): St, Query(q): Query<ApkQ>) -> Response {
-    let url = format!("https://api.github.com/repos/{RELEASES_REPO}/releases/assets/{}", q.id);
-    let resp = match github(&s, &url, "application/octet-stream")
+    let public = q.repo.as_deref() != Some("private");
+    let url = format!(
+        "https://api.github.com/repos/{}/releases/assets/{}",
+        repo_of(public),
+        q.id
+    );
+    let resp = match github(&s, &url, "application/octet-stream", !public)
         .timeout(std::time::Duration::from_secs(3600))
         .send()
         .await
@@ -616,9 +703,10 @@ async fn app_update_apk(State(s): St, Query(q): Query<ApkQ>) -> Response {
         let code = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
         return (code, format!("GitHub: HTTP {}", resp.status().as_u16())).into_response();
     }
-    let mut r = Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/vnd.android.package-archive");
+    let mut r = Response::builder().status(StatusCode::OK).header(
+        header::CONTENT_TYPE,
+        "application/vnd.android.package-archive",
+    );
     if let Some(len) = resp.content_length() {
         r = r.header(header::CONTENT_LENGTH, len);
     }
@@ -637,9 +725,12 @@ async fn set_update_token(State(s): St, Json(req): Json<TokenReq>) -> ApiResult<
     if t.is_empty() {
         let _ = std::fs::remove_file(&path);
     } else {
-        std::fs::write(&path, t).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        std::fs::write(&path, t)
+            .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     }
-    Ok(Json(json!({ "saved": !t.is_empty(), "has_token": update_token(&s).is_some() })))
+    Ok(Json(
+        json!({ "saved": !t.is_empty(), "has_token": update_token(&s).is_some() }),
+    ))
 }
 
 // ---------- tags ----------
