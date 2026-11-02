@@ -65,6 +65,8 @@ jobs:
 
       - name: Build APK
         env:
+          # read-only token so the app sees releases while the repository is private (optional)
+          VNSHELF_UPDATE_TOKEN: ${{ secrets.VNSHELF_UPDATE_TOKEN }}
           VNSHELF_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           VNSHELF_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           VNSHELF_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}

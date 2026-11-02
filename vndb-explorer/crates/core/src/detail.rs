@@ -282,6 +282,127 @@ pub fn fallback(title: &str) -> Vec<Source> {
 }
 
 /// Cleaned description (VNDB BBCode stripped, spoilers kept in `[spoiler]` markers for the UI).
+/// A screenshot linked from a tag description ("Example 1", "NSFW Example 2").
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct TagExample {
+    /// Image path for the `/img/` proxy, e.g. `sf/01/6101.jpg`.
+    pub path: String,
+    pub nsfw: bool,
+}
+
+/// A piece of a tag description: plain text, a link to another tag, or an external link.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct DescPart {
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct TagDescription {
+    /// Plain text without markup and without the example links (for translation).
+    pub text: String,
+    pub parts: Vec<DescPart>,
+    pub examples: Vec<TagExample>,
+}
+
+fn screenshot_path(url: &str) -> Option<String> {
+    let rest = url.split("vndb.org/").nth(1)?;
+    let p = rest.trim_end_matches('/');
+    p.starts_with("sf/").then(|| p.to_string())
+}
+
+fn tag_link(url: &str) -> Option<u32> {
+    let rest = url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_start_matches("vndb.org");
+    rest.strip_prefix("/g")?.trim_end_matches('/').parse().ok()
+}
+
+/// Split a VNDB tag description into readable parts: screenshot links ("Example 1") become
+/// image examples instead of dangling words, `/gN` links become links to tags.
+pub fn tag_description(raw: &str) -> TagDescription {
+    let mut parts: Vec<DescPart> = Vec::new();
+    let mut examples = Vec::new();
+    let push = |parts: &mut Vec<DescPart>, text: &str, tag: Option<u32>, url: Option<String>| {
+        if text.is_empty() {
+            return;
+        }
+        if tag.is_none() && url.is_none() {
+            if let Some(last) = parts.last_mut().filter(|p| p.tag.is_none() && p.url.is_none()) {
+                last.text.push_str(text);
+                return;
+            }
+        }
+        parts.push(DescPart { text: text.to_string(), tag, url });
+    };
+    let mut rest = raw;
+    loop {
+        let Some(start) = rest.find("[url=") else {
+            push(&mut parts, &clean_bbcode_keep(rest), None, None);
+            break;
+        };
+        push(&mut parts, &clean_bbcode_keep(&rest[..start]), None, None);
+        let after = &rest[start + 5..];
+        let (Some(close), Some(end)) = (after.find(']'), after.find("[/url]")) else {
+            push(&mut parts, &clean_bbcode_keep(after), None, None);
+            break;
+        };
+        if close > end {
+            rest = &after[end + 6..];
+            continue;
+        }
+        let url = after[..close].trim();
+        let text = clean_bbcode_keep(&after[close + 1..end]);
+        rest = &after[end + 6..];
+        if let Some(path) = screenshot_path(url) {
+            examples.push(TagExample { path, nsfw: text.to_lowercase().contains("nsfw") });
+        } else if let Some(id) = tag_link(url) {
+            push(&mut parts, &text, Some(id), None);
+        } else if url.starts_with("http") {
+            push(&mut parts, &text, None, Some(url.to_string()));
+        } else {
+            push(&mut parts, &text, None, None);
+        }
+    }
+    // tidy whitespace left by removed example links: no blank-ish lines, at most one empty line
+    for p in parts.iter_mut().filter(|p| p.tag.is_none() && p.url.is_none()) {
+        let mut t: String = p
+            .text
+            .split('\n')
+            .map(|l| if l.trim().is_empty() { "" } else { l })
+            .collect::<Vec<_>>()
+            .join("\n");
+        while t.contains("\n\n\n") {
+            t = t.replace("\n\n\n", "\n\n");
+        }
+        p.text = t;
+    }
+    if let Some(p) = parts.first_mut() {
+        p.text = p.text.trim_start().to_string();
+    }
+    if let Some(p) = parts.last_mut() {
+        p.text = p.text.trim_end().to_string();
+    }
+    parts.retain(|p| !p.text.is_empty());
+    let text: String = parts.iter().map(|p| p.text.as_str()).collect();
+    TagDescription { text: text.trim().to_string(), parts, examples }
+}
+
+/// Like [`clean_bbcode`] but keeps the surrounding whitespace (used for fragments).
+fn clean_bbcode_keep(s: &str) -> String {
+    let lead = s.len() - s.trim_start().len();
+    let trail = s.len() - s.trim_end().len();
+    let core = clean_bbcode(s);
+    if core.is_empty() {
+        return s.to_string();
+    }
+    format!("{}{}{}", &s[..lead], core, &s[s.len() - trail..])
+}
+
 pub fn clean_bbcode(s: &str) -> String {
     const KNOWN: &[&str] = &["b", "i", "u", "s", "url", "quote", "raw", "code"];
     let mut out = String::new();
@@ -696,6 +817,22 @@ mod tests {
                 (SourceKind::FanPatch, "https://fans/"),
             ]
         );
+    }
+
+    #[test]
+    fn tag_description_examples_and_links() {
+        let d = tag_description("Box at the bottom.\n\nIf not, use the [url=http://vndb.org/g398]Floating Textbox[/url] tag.\n\n[url=http://s.vndb.org/sf/01/6101.jpg]Example 1[/url]\n[url=https://s2.vndb.org/sf/04/1304.jpg]NSFW Example 2[/url]\nSee [url=https://en.wikipedia.org/wiki/X]Wikipedia[/url].");
+        assert_eq!(d.text, "Box at the bottom.\n\nIf not, use the Floating Textbox tag.\n\nSee Wikipedia.");
+        assert_eq!(
+            d.examples,
+            vec![
+                TagExample { path: "sf/01/6101.jpg".into(), nsfw: false },
+                TagExample { path: "sf/04/1304.jpg".into(), nsfw: true },
+            ]
+        );
+        assert_eq!(d.parts[1].tag, Some(398));
+        assert_eq!(d.parts[3].url.as_deref(), Some("https://en.wikipedia.org/wiki/X"));
+        assert!(!d.text.contains("Example"));
     }
 
     #[test]

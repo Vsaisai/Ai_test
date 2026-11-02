@@ -1,7 +1,7 @@
 // Long press (or right click) on any element with data-tag="<id>" shows what the tag means.
 // The card appears above the finger (or below if there is no room) so the finger does not cover it.
 import { api } from './api.js';
-import { h } from './ui.js';
+import { h, tagDescription } from './ui.js';
 import { settings } from './store.js';
 import { tagLabel, catRu } from './taxonomy.js';
 
@@ -43,16 +43,23 @@ async function show(id, x, y) {
   try { t = await info(id); } catch (e) { body.replaceChildren(h('div', {}, e.message)); place(el, x, y); return; }
   if (tip !== el) return;
   const label = tagLabel(t);
-  const desc = h('p', { class: 'tagtip-desc' }, t.description || 'Описания нет.');
+  const desc = h('div', { class: 'tagtip-desc' });
+  const original = t.description || '';
+  const showOriginal = () => {
+    desc.replaceChildren(original || t.examples?.length ? tagDescription(t, { onNavigate: close }) : 'Описания нет.');
+    desc.querySelectorAll('img').forEach(im => im.addEventListener('load', () => { if (tip === el) place(el, x, y); }));
+  };
+  showOriginal();
   const tr = h('button', { class: 'linkish small', type: 'button' }, 'Перевести');
   let translated = false;
-  const original = t.description || '';
   const toggle = async () => {
-    if (translated) { desc.textContent = original; tr.textContent = 'Перевести'; translated = false; place(el, x, y); return; }
+    if (translated) { showOriginal(); tr.textContent = 'Перевести'; translated = false; place(el, x, y); return; }
     tr.textContent = 'Перевожу…';
     try {
       const r = await api.translate([original]);
-      desc.textContent = r.translations[0]; tr.textContent = 'Оригинал'; translated = true;
+      const p = desc.querySelector('p.desc');
+      if (p) p.textContent = r.translations[0]; else desc.textContent = r.translations[0];
+      tr.textContent = 'Оригинал'; translated = true;
     } catch (err) { tr.textContent = 'Нет связи'; }
     place(el, x, y);
   };

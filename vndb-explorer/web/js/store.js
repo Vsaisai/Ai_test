@@ -5,7 +5,6 @@ const KEY = 'vnshelf.settings';
 export const APP_VERSION = (navigator.userAgent.match(/VNShelfApp\/([\w.\-]+)/) || [])[1] || null;
 export const IN_APP = APP_VERSION !== null;
 /** Where mobile releases are published. */
-export const RELEASES_API = 'https://api.github.com/repos/Vsaisai/Ai_test/releases?per_page=20';
 export const RELEASES_PAGE = 'https://github.com/Vsaisai/Ai_test/releases';
 
 export const DEFAULTS = {

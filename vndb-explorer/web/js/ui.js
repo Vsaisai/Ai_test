@@ -195,3 +195,29 @@ export function jobPanel(job, { compact = false, link = null } = {}) {
     p && p.detail ? h('div', { class: 'job-detail' }, p.detail) : null,
     details);
 }
+
+/** Tag description from /api/tags/:id: text with links to other tags, plus example screenshots. */
+export function tagDescription(t, { onNavigate, examples = true } = {}) {
+  const p = h('p', { class: 'desc' });
+  const parts = t.parts && t.parts.length ? t.parts : [{ text: t.description || '' }];
+  for (const x of parts) {
+    if (x.tag) p.append(h('a', { href: `#/tag/${x.tag}`, onclick: onNavigate }, x.text));
+    else if (x.url) p.append(h('a', { href: x.url, target: '_blank', rel: 'noopener' }, x.text));
+    else p.append(x.text);
+  }
+  const s = settings();
+  const shown = (t.examples || []).filter(e => !e.nsfw || s.adultTags);
+  if (!examples || !shown.length) return p;
+  const imgs = shown.map((e, i) => ({ src: img(e.path), alt: `Пример ${i + 1}`, nsfw: e.nsfw }));
+  const strip = h('div', { class: 'tag-examples' },
+    h('span', { class: 'muted small' }, 'Как это выглядит:'),
+    h('div', { class: 'tag-examples-row' }, imgs.map((im, i) => {
+      const nsfwBlur = im.nsfw && s.blur !== 'off';
+      return h('button', { type: 'button', class: `tag-example${nsfwBlur ? ' blurred' : ''}`, 'aria-label': im.alt,
+        onclick: async ev => {
+          ev.preventDefault(); ev.stopPropagation();
+          const m = await import('./lightbox.js'); m.openLightbox(imgs, i);
+        } }, h('img', { src: im.src, alt: im.alt, loading: 'lazy', decoding: 'async' }));
+    })));
+  return h('div', {}, p, strip);
+}
