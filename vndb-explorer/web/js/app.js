@@ -1,6 +1,7 @@
 // Entry point: navigation + hash router.
 import { applyTheme, settings, save, IN_APP, APP_VERSION, RELEASES_API, RELEASES_PAGE } from './store.js';
 import { h, toast, jobPanel } from './ui.js';
+import { installTagTips } from './tagtip.js';
 import { api } from './api.js';
 import { viewHome, viewShelf, viewSearch, viewTags, viewTag, viewVn, viewMy, viewSettings } from './views.js';
 
@@ -148,9 +149,13 @@ export async function checkAppUpdate({ interactive = false } = {}) {
     const ver = rel.tag_name.replace(/^mobile-v/, '');
     const apk = (rel.assets || []).find(a => a.name.endsWith('.apk'));
     if (newer(ver, APP_VERSION) && apk) {
-      showBanner(`Вышла новая версия приложения ${ver} (у вас ${APP_VERSION}).`,
-        [h('a', { class: 'btn primary', href: apk.browser_download_url }, 'Скачать APK'),
-         h('a', { class: 'btn', href: rel.html_url }, 'Что нового')]);
+      const size = apk.size ? ` (${(apk.size / 1048576).toFixed(1).replace('.', ',')} МБ)` : '';
+      const canSelf = !!(window.VNShelfNative && window.VNShelfNative.startUpdate);
+      showBanner(`Вышла новая версия приложения ${ver} (у вас ${APP_VERSION}).`, [
+        canSelf
+          ? h('button', { class: 'btn primary', onclick: () => selfUpdate(apk.browser_download_url, ver) }, `Обновить${size}`)
+          : h('a', { class: 'btn primary', href: apk.browser_download_url }, `Скачать APK${size}`),
+        h('a', { class: 'btn', href: rel.html_url }, 'Что нового')]);
     } else if (interactive) {
       toast(`Установлена последняя версия (${APP_VERSION})`);
     }
@@ -161,8 +166,41 @@ export async function checkAppUpdate({ interactive = false } = {}) {
   }
 }
 
+/** Download the new APK inside the app and hand it to the system installer (like Telegram). */
+function selfUpdate(url, ver) {
+  const res = window.VNShelfNative.startUpdate(url);
+  if (res === 'need_permission') {
+    showBanner('Разрешите приложению устанавливать обновления (откроются настройки Android), затем нажмите «Обновить» ещё раз.',
+      [h('button', { class: 'btn primary', onclick: () => selfUpdate(url, ver) }, 'Обновить')]);
+    return;
+  }
+  const poll = () => {
+    let st = {};
+    try { st = JSON.parse(window.VNShelfNative.updateStatus() || '{}'); } catch { /* ignore */ }
+    if (st.state === 'downloading') {
+      const pct = st.total ? Math.floor(st.done * 100 / st.total) : null;
+      const mb = b => (b / 1048576).toFixed(1).replace('.', ',');
+      showBanner(h('div', { class: 'job compact' },
+        h('div', { class: 'job-head' }, h('b', {}, pct !== null ? `${pct}%` : '…'), h('span', {}, ` Загружаю версию ${ver}${st.total ? ` · ${mb(st.done)} из ${mb(st.total)} МБ` : ''}`)),
+        h('div', { class: `bar ${pct === null ? 'indet' : ''}` }, h('i', { style: pct === null ? {} : { width: `${pct}%` } }))));
+      setTimeout(poll, 400);
+    } else if (st.state === 'installing') {
+      showBanner(`Подтвердите установку версии ${ver} в системном окне.`);
+      setTimeout(poll, 1000);
+    } else if (st.state === 'error') {
+      showBanner(`⚠️ Не удалось обновить: ${st.error || 'ошибка'}`, [h('button', { class: 'btn', onclick: () => selfUpdate(url, ver) }, 'Повторить')]);
+    } else if (st.state === 'done') {
+      showBanner('Обновление установлено — приложение перезапустится.');
+    } else {
+      setTimeout(poll, 500);
+    }
+  };
+  poll();
+}
+
 applyTheme();
 buildNav();
+installTagTips();
 window.addEventListener('hashchange', route);
 route();
 setTimeout(() => checkUpdates(), 1500);

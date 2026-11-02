@@ -106,6 +106,17 @@ public class MainActivity extends Activity {
             });
         }
 
+        /** In-app update: "ok", "busy" or "need_permission". */
+        @JavascriptInterface
+        public String startUpdate(String url) {
+            return Updater.start(MainActivity.this, url);
+        }
+
+        @JavascriptInterface
+        public String updateStatus() {
+            return Updater.status();
+        }
+
         @JavascriptInterface
         public void keepAwake(boolean on) {
             runOnUiThread(() -> {

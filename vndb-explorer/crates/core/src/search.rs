@@ -80,6 +80,8 @@ pub struct SearchRequest {
     pub hide_cancelled: bool,
     /// Only VNs that are already released (no TBA / future dates).
     pub released_only: bool,
+    /// Also return per-tag counts over all found VNs (for "how many are left" in tag pickers).
+    pub tag_counts: bool,
     /// Restrict to these VN ids (personal lists).
     pub ids: Option<Vec<u32>>,
     pub sort: Sort,
@@ -111,6 +113,7 @@ impl Default for SearchRequest {
             freeware: None,
             hide_cancelled: false,
             released_only: false,
+            tag_counts: false,
             ids: None,
             sort: Sort::Relevance,
             offset: 0,
@@ -164,6 +167,9 @@ pub struct SearchResponse {
     pub want: Vec<ResolvedTag>,
     pub exclude: Vec<ResolvedTag>,
     pub warnings: Vec<String>,
+    /// With `tag_counts: true`: how many of the found VNs have each tag (sub-tags included).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag_counts: Option<std::collections::HashMap<u32, u32>>,
 }
 
 struct Compiled {
@@ -264,7 +270,8 @@ pub fn search(cat: &Catalog, req: &SearchRequest) -> Result<SearchResponse> {
             .map(String::from)
             .collect(),
     };
-    let min_match = req.min_match.unwrap_or(if want.is_empty() { 0 } else { 1 });
+    // Wanted tags only rank results unless a minimum is asked for explicitly.
+    let min_match = req.min_match.unwrap_or(0);
     let ids: Option<std::collections::HashSet<u32>> =
         req.ids.as_ref().map(|v| v.iter().copied().collect());
 
@@ -452,6 +459,30 @@ pub fn search(cat: &Catalog, req: &SearchRequest) -> Result<SearchResponse> {
     });
 
     let total = hits.len();
+    let tag_counts = req.tag_counts.then(|| {
+        let mut counts: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+        let mut seen: Vec<u32> = Vec::new();
+        for h in &hits {
+            seen.clear();
+            for t in
+                h.v.tags
+                    .iter()
+                    .filter(|t| !t.lie && t.spoiler <= req.spoiler && t.rating >= req.min_level)
+            {
+                if let Some(anc) = cat.ancestors.get(&t.tag) {
+                    for a in anc {
+                        if !seen.contains(a) {
+                            seen.push(*a);
+                        }
+                    }
+                }
+            }
+            for a in &seen {
+                *counts.entry(*a).or_default() += 1;
+            }
+        }
+        counts
+    });
     let limit = req.limit.clamp(1, 500);
     let items = hits
         .into_iter()
@@ -460,6 +491,7 @@ pub fn search(cat: &Catalog, req: &SearchRequest) -> Result<SearchResponse> {
         .map(|h| card(h.v, order, h.matched, h.missing))
         .collect();
     Ok(SearchResponse {
+        tag_counts,
         total,
         offset: req.offset,
         items,

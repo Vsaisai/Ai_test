@@ -21,6 +21,8 @@ export const DEFAULTS = {
   hideCancelled: false,
   updatePolicy: 'smart',  // smart: small updates automatically, ask before a full re-download
                           // auto: everything automatically | manual: only from Settings
+  platform: 'any',        // any | pc | phone — where the game should be playable
+  translate: true,        // VN pages: descriptions and tags in Russian (machine translation, cached)
   lastUpdateCheck: 0,
   lastAppCheck: 0,
 };
@@ -43,6 +45,9 @@ export function save(patch) {
   return cache;
 }
 
+/** Platforms that count as "PC" / "phone". */
+export const PLATFORM_GROUPS = { pc: ['win', 'lin', 'mac'], phone: ['and', 'ios'] };
+
 export function langList() {
   return settings().langs.split(',').map(s => s.trim()).filter(Boolean);
 }
@@ -57,6 +62,7 @@ export function baseRequest() {
     ero: s.hideAdult ? 'hide' : 'show',
     spoiler: Number(s.spoiler) || 0,
     hide_cancelled: s.hideCancelled,
+    platforms: PLATFORM_GROUPS[s.platform] || [],
   };
 }
 

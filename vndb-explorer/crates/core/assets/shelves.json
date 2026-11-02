@@ -117,7 +117,8 @@
               "Nakige",
               "Utsuge"
             ],
-            "sort": "votes"
+            "sort": "votes",
+            "min_match": 1
           }
         },
         {
@@ -178,7 +179,8 @@
               "Time Travel",
               "Time Loop"
             ],
-            "sort": "votes"
+            "sort": "votes",
+            "min_match": 1
           }
         },
         {

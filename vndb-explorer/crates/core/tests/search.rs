@@ -241,3 +241,35 @@ fn text_search_and_tag_counts() {
         ("Theme".to_string(), "Drama".to_string())
     );
 }
+
+#[test]
+fn wanted_tags_do_not_filter_by_default_and_counts_follow_filters() {
+    let (_d, cat) = catalog();
+    // one wanted tag: VNs without it are still listed, just after the ones that have it
+    let r = search(
+        &cat,
+        &SearchRequest {
+            want: vec!["ADV".into()],
+            lang_mode: LangMode::Any,
+            sort: Sort::Relevance,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(r.total, 6);
+    assert!(r.items[0].all_wanted && !r.items[5].all_wanted);
+    // counts are taken over the filtered set (Drama required -> 5 VNs; ADV among them: 4)
+    let r = search(
+        &cat,
+        &SearchRequest {
+            must: vec!["Drama".into()],
+            lang_mode: LangMode::Any,
+            tag_counts: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let c = r.tag_counts.unwrap();
+    assert_eq!(c.get(&2), Some(&5));
+    assert_eq!(c.get(&6), Some(&4));
+}

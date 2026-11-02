@@ -33,7 +33,8 @@ export const api = {
     return st;
   },
   startImport: () => call('POST', '/api/import', {}),
-  updates: (force = false) => call('GET', `/api/updates${force ? '?force=1' : ''}`),
+  updates: (force = false) => call('GET', `/api/updates${force ? '?force=true' : ''}`),
+  translate: (texts, to = 'ru') => call('POST', '/api/translate', { texts, to }),
   sync: () => call('POST', '/api/sync', {}),
   sources: () => call('GET', '/api/sources'),
   refreshSources: () => call('POST', '/api/sources/refresh', {}),

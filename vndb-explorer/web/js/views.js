@@ -1,9 +1,9 @@
 // All screens of the app.
 import { api, img } from './api.js';
-import { settings, save, baseRequest, DEFAULTS, IN_APP, APP_VERSION } from './store.js';
+import { settings, save, baseRequest, DEFAULTS, IN_APP, APP_VERSION, PLATFORM_GROUPS } from './store.js';
 import {
   h, card, cover, spinner, errorBox, toast, debounce, langBadges, fmtLength,
-  LANG_NAMES, PLATFORMS, MARKS, jobPanel,
+  LANG_NAMES, PLATFORMS, MARKS, jobPanel, langLegend,
 } from './ui.js';
 import { CURATED, ADULT, tagLabel, catRu, resolveGroup } from './taxonomy.js';
 import { openLightbox } from './lightbox.js';
@@ -76,7 +76,7 @@ function pathText(tags, id) {
 }
 
 /** Autocomplete input for tags. `onPick(tag, mode)`; mode is 'must' | 'want' | 'exclude'. */
-function tagPicker(tags, onPick, defaultMode = 'want') {
+function tagPicker(tags, onPick, defaultMode = 'want', countOf = t => t.vns) {
   let mode = defaultMode;
   const list = h('div', { class: 'suggest', hidden: true });
   const input = h('input', { type: 'search', placeholder: 'Добавить тег… (например, «петля» или time loop)', autocomplete: 'off' });
@@ -93,7 +93,7 @@ function tagPicker(tags, onPick, defaultMode = 'want') {
       onmousedown: e => { e.preventDefault(); pick(t); },
     }, h('span', { class: 'sug-name' }, tagLabel(t), tagLabel(t) !== t.name ? h('span', { class: 'sug-en' }, ` ${t.name}`) : null),
       h('span', { class: 'sug-path' }, pathText(tags, t.id)),
-      h('span', { class: 'sug-count' }, t.vns))));
+      h('span', { class: 'sug-count' }, countOf(t)))));
     list.hidden = !found.length;
     list._found = found;
   };
@@ -263,6 +263,7 @@ function readSearch(params) {
     votes: params.get('votes') || '', rating: params.get('rating') || '',
     free: params.get('free') === '1',
     mm: params.get('mm') || '',
+    dev: params.get('dev') || '',
   };
 }
 
@@ -273,6 +274,7 @@ function writeSearch(st) {
   if (st.sort && st.sort !== 'relevance') p.set('sort', st.sort);
   for (const k of ['lmin', 'lmax', 'yfrom', 'yto', 'votes', 'rating', 'mm']) if (st[k] !== '' && st[k] !== undefined) p.set(k, st[k]);
   if (st.free) p.set('free', '1');
+  if (st.dev) p.set('dev', st.dev);
   return `#/search?${p}`;
 }
 
@@ -297,7 +299,7 @@ export async function viewSearch(root, params) {
   const renderChips = () => {
     chips.replaceChildren(...['must', 'want', 'exclude'].flatMap(k => st[k].map(id => {
       const t = tags.byId.get(id);
-      return h('span', { class: `chip ${k}`, title: t ? `${t.name} — ${pathText(tags, id)}` : '' },
+      return h('span', { class: `chip ${k}`, 'data-tag': id, title: t ? `${t.name} — ${pathText(tags, id)}` : '' },
         h('button', {
           type: 'button', class: 'chip-mode', title: 'Сменить: обязательно → желательно → исключить',
           onclick: () => {
@@ -331,20 +333,27 @@ export async function viewSearch(root, params) {
       h('div', { class: 'field' }, h('span', {}, 'Год выхода'), h('div', { class: 'pair' }, num('yfrom', 'с'), num('yto', 'по'))),
       h('div', { class: 'field' }, h('span', {}, 'Мин. голосов'), num('votes', '0')),
       h('div', { class: 'field' }, h('span', {}, 'Мин. рейтинг (1–10)'), num('rating', '0')),
-      h('div', { class: 'field' }, h('span', {}, 'Мин. желательных тегов'), num('mm', '1')),
+      h('div', { class: 'field' }, h('span', {}, 'Мин. желательных тегов'), num('mm', '0')),
       h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: st.free, onchange: e => { st.free = e.target.checked; go(); } }), 'Только бесплатные'),
       h('div', { class: 'field full' }, h('span', {}, 'Платформы'), platSel)),
     h('p', { class: 'muted small' }, 'Языки и спойлеры настраиваются в «Настройках».'));
 
+  const dev = st.dev || settings().platform || 'any';
+  const devSeg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Где играть' },
+    [['any', 'Везде'], ['pc', '💻 ПК'], ['phone', '📱 Телефон']].map(([v, l]) => h('button', {
+      type: 'button', class: v === dev ? 'on' : '', onclick: () => { st.dev = v; st.plat = []; go(); },
+    }, l)));
+  let counts = null; // tag counts over the current results
   root.append(
     h('div', { class: 'page-head' }, h('h1', {}, 'Поиск')),
     h('div', { class: 'panel search-panel' },
       text,
+      h('div', { class: 'dev-line' }, h('span', { class: 'muted small' }, 'Где играть:'), devSeg),
       tagPicker(tags, (t, mode) => {
         for (const k of ['must', 'want', 'exclude']) st[k] = st[k].filter(x => x !== t.id);
         st[mode].push(t.id);
         go();
-      }),
+      }, 'want', t => (counts ? (counts[t.id] || 0) : t.vns)),
       chips,
       filters,
       h('div', { class: 'toolbar' },
@@ -352,7 +361,7 @@ export async function viewSearch(root, params) {
         h('a', { class: 'btn', href: '#/tags' }, '🏷️ Выбрать из каталога'),
         h('button', { class: 'btn', onclick: () => { location.hash = '#/search'; } }, 'Сбросить'))),
   );
-  if (!st.must.length && !st.want.length && !st.exclude.length && !st.q && !st.plat.length && !st.free && !st.lmax && !st.lmin) {
+  if (!st.must.length && !st.want.length && !st.exclude.length && !st.q && !st.plat.length && !st.free && !st.lmax && !st.lmin && !st.dev) {
     root.append(h('p', { class: 'muted center' }, 'Добавьте теги или название — или выберите теги в каталоге.'));
     return;
   }
@@ -361,15 +370,18 @@ export async function viewSearch(root, params) {
     text: st.q || null,
     must: st.must.map(String), want: st.want.map(String), exclude: st.exclude.map(String),
     sort: st.sort,
-    platforms: st.plat,
+    platforms: st.plat.length ? st.plat : (PLATFORM_GROUPS[dev] || []),
     length_min: st.lmin ? Number(st.lmin) : null, length_max: st.lmax ? Number(st.lmax) : null,
     year_from: st.yfrom ? Number(st.yfrom) : null, year_to: st.yto ? Number(st.yto) : null,
     min_votes: st.votes ? Number(st.votes) : null, min_rating: st.rating ? Number(st.rating) : null,
     freeware: st.free ? true : null,
     min_match: st.mm !== '' ? Number(st.mm) : null,
   };
-  root.append(resultGrid(offset => api.search({ ...req, offset, limit: 48 }),
-    { wantCount: st.want.length, hl: [...st.must, ...st.want] }));
+  root.append(resultGrid(async offset => {
+    const r = await api.search({ ...req, offset, limit: 48, tag_counts: offset === 0 });
+    if (r.tag_counts) counts = r.tag_counts;
+    return r;
+  }, { wantCount: st.want.length, hl: [...st.must, ...st.want] }));
 }
 
 // ---------- tag catalog ----------
@@ -380,6 +392,35 @@ const NEXT_MODE = { undefined: 'want', want: 'must', must: 'exclude', exclude: u
 const MODE_ICON = { want: '~', must: '!', exclude: '−' };
 const MODE_NAME = { want: 'желательно', must: 'обязательно', exclude: 'исключить' };
 
+// Counts of the catalog chips under the current selection (required + excluded tags and settings).
+let lastCounts = null;
+let lastTotal = null;
+let countsSeq = 0;
+
+function paintCounts() {
+  if (!lastCounts) return;
+  document.querySelectorAll('.tchip[data-tag]').forEach(el => {
+    const n = lastCounts[el.dataset.tag] || 0;
+    const c = el.querySelector('.tchip-count');
+    if (c) c.textContent = n;
+    el.classList.toggle('zero', n === 0 && !el.dataset.mode);
+  });
+}
+
+const refreshCounts = debounce(async bar => {
+  const seq = ++countsSeq;
+  const st = { must: [], exclude: [] };
+  for (const [id, m] of picked) if (m !== 'want') st[m].push(String(id));
+  try {
+    const r = await api.search({ ...baseRequest(), ...st, limit: 1, tag_counts: true });
+    if (seq !== countsSeq) return;
+    lastCounts = r.tag_counts || {};
+    lastTotal = r.total;
+    paintCounts();
+    bar && bar._render();
+  } catch { /* counts are a nicety */ }
+}, 200);
+
 function pickBar() {
   const bar = h('div', { class: 'pickbar', hidden: true });
   const render = () => {
@@ -388,8 +429,13 @@ function pickBar() {
     bar.hidden = picked.size === 0;
     bar.replaceChildren(
       h('span', { class: 'pickbar-sum' }, `Тегов: ${picked.size}`,
-        h('span', { class: 'muted small' }, ` (${Object.entries(count).filter(([, n]) => n).map(([m, n]) => `${MODE_ICON[m]}${n}`).join(' ')})`)),
-      h('button', { class: 'btn', type: 'button', onclick: () => { picked.clear(); document.querySelectorAll('.tchip[data-mode]').forEach(c => { c.removeAttribute('data-mode'); }); render(); } }, 'Сбросить'),
+        h('span', { class: 'muted small' }, ` (${Object.entries(count).filter(([, n]) => n).map(([m, n]) => `${MODE_ICON[m]}${n}`).join(' ')})`),
+        lastTotal !== null ? h('span', { class: 'pickbar-found' }, `найдётся ${lastTotal.toLocaleString('ru')}`) : null),
+      h('button', { class: 'btn', type: 'button', onclick: () => {
+        picked.clear();
+        document.querySelectorAll('.tchip[data-mode]').forEach(c => { c.removeAttribute('data-mode'); c.querySelector('.tchip-mode').textContent = ''; });
+        render(); refreshCounts(bar);
+      } }, 'Сбросить'),
       h('button', { class: 'btn primary', type: 'button', onclick: () => {
         const st = { must: [], want: [], exclude: [] };
         for (const [id, m] of picked) st[m].push(id);
@@ -413,8 +459,11 @@ function tagChip(t, label, bar) {
       if (m) picked.set(t.id, m); else picked.delete(t.id);
       paint();
       bar._render();
+      refreshCounts(bar);
     },
-  }, icon, h('span', { class: 'tchip-label' }, label), h('span', { class: 'tchip-count' }, t.vns));
+  }, icon, h('span', { class: 'tchip-label' }, label), h('span', { class: 'tchip-count' }, lastCounts ? (lastCounts[t.id] || 0) : t.vns));
+  el.dataset.tag = t.id;
+  el.title = `${t.name} · удерживайте, чтобы узнать, что это`;
   const paint = () => {
     const m = picked.get(t.id);
     if (m) el.dataset.mode = m; else el.removeAttribute('data-mode');
@@ -441,7 +490,8 @@ export async function viewTags(root, sub, params) {
 
   const renderCatalog = () => {
     const groups = CURATED.map(g => groupBlock(g.title, resolveGroup(g, tags)));
-    mount(body, h('p', { class: 'muted small' }, 'Нажмите на тег: один раз — желательно (~), два — обязательно (!), три — исключить (−).'), groups);
+    mount(body, h('p', { class: 'muted small' }, 'Нажмите на тег: один раз — желательно (~), два — обязательно (!), три — исключить (−). ' +
+      'Удерживайте тег, чтобы узнать, что он значит. Число — сколько новелл с этим тегом останется вместе с уже выбранными обязательными и исключёнными.'), groups);
   };
 
   const treeRow = t => h('div', { class: 'tag-row' },
@@ -484,11 +534,13 @@ export async function viewTags(root, sub, params) {
       mount(body, found.length
         ? h('div', { class: 'tchips' }, found.filter(t => t.searchable).map(t => tagChip(t, tagLabel(t), bar)))
         : h('p', { class: 'muted' }, 'Ничего не найдено.'));
+      paintCounts();
       return;
     }
     if (tab === 'all') renderTree();
     else if (tab === 'adult') renderAdult();
     else renderCatalog();
+    paintCounts();
   };
   filter.addEventListener('input', debounce(render, 150));
 
@@ -500,6 +552,7 @@ export async function viewTags(root, sub, params) {
       adultOn() ? h('a', { href: '#/tags/adult', class: tab === 'adult' ? 'on' : '' }, 'Для взрослых') : null),
     filter, body, bar);
   render();
+  refreshCounts(bar);
 }
 
 export async function viewTag(root, id) {
@@ -579,7 +632,7 @@ function releasesBlock(d) {
     `Показать ещё ${rest.length} (японский, китайский, корейский)`) : null;
   return h('details', { class: 'panel releases-panel' },
     h('summary', {}, `Релизы (${d.releases.length})`),
-    h('p', { class: 'muted small' }, 'Языки: сплошная рамка — официальный перевод, контур — фанатский, пунктир — машинный.'),
+    langLegend(),
     main.length ? [section('Официальные', official), section('Фанатские переводы и патчи', fan)].filter(Boolean)
       : h('p', { class: 'muted' }, 'Релизов на читаемых языках нет.'),
     restBox, moreBtn);
@@ -662,11 +715,53 @@ export async function viewVn(root, id, params = new URLSearchParams()) {
         : h('span', { class: 'hl no', title: 'у этой новеллы такого тега нет' }, '✗ ', nameOf(tid));
     })) : null;
 
-  // tags
+  // ---- translation (description + tag names), toggled per user, cached on the server ----
+  let tr = !!s.translate;
+  const tagTr = new Map(); // tag id -> machine translation (tags without a curated Russian label)
+  const descParts = d.description.split(/\[\/?spoiler\]/);
+  let descTr = null;
+  const trNote = h('span', { class: 'muted small tr-note' });
+  const trBtn = h('button', { class: 'btn small-btn', type: 'button', onclick: () => {
+    tr = !tr; save({ translate: tr }); paintTrBtn(); renderTags(); renderDesc(); if (tr) loadTranslations();
+  } });
+  const paintTrBtn = () => { trBtn.textContent = tr ? '🌐 Перевод · показать оригинал' : '🌐 Оригинал · перевести'; };
+  paintTrBtn();
+  const tagName = t => {
+    const tt = tags?.byId.get(t.id);
+    if (!tr) return t.name;
+    if (tt && tagLabel(tt) !== tt.name) return tagLabel(tt);
+    return tagTr.get(t.id) || t.name;
+  };
+  async function loadTranslations() {
+    // description first (one quick request), tag names after
+    if (!descTr && d.description) {
+      trNote.textContent = 'перевожу…';
+      try {
+        descTr = (await api.translate(descParts)).translations;
+        if (tr) renderDesc();
+        trNote.textContent = '';
+      } catch (e) {
+        trNote.textContent = 'перевод недоступен (нет интернета?) — показан оригинал';
+        return;
+      }
+    }
+    const need = vnTags.filter(t => { const tt = tags?.byId.get(t.id); return !(tt && tagLabel(tt) !== tt.name) && !tagTr.has(t.id); });
+    if (!need.length) return;
+    try {
+      const r = await api.translate(need.map(t => t.name));
+      need.forEach((t, j) => tagTr.set(t.id, r.translations[j]));
+      if (tr) renderTags();
+    } catch { /* tags stay in English */ }
+  }
+
+  // ---- tags: same brightness for all; with "all spoilers" minor/major ones are a bit faded;
+  //      tags that appear after switching the spoiler level flash briefly ----
   let spoil = Number(s.spoiler) || 0;
   const showAdult = adultOn();
   const tagBox = h('div', {});
-  const renderTags = () => {
+  let shownBefore = null;
+  const renderTags = (fresh = false) => {
+    const nowShown = new Set();
     mount(tagBox, d.tags.map(cat => {
       const groupsEl = cat.groups.map(g => {
         const visible = g.tags.filter(t => (t.spoiler <= spoil || hitBy.has(t.id) && t.spoiler <= Math.max(spoil, 1)) && (showAdult || !t.ero));
@@ -674,30 +769,43 @@ export async function viewVn(root, id, params = new URLSearchParams()) {
         visible.sort((a, b) => (hitBy.has(b.id) - hitBy.has(a.id)) || (b.rating - a.rating));
         return h('div', { class: 'tag-line' }, h('span', { class: 'tag-sub' }, catRu(g.name)),
           visible.map(t => {
-            const tt = tags?.byId.get(t.id);
-            const label = tt ? tagLabel(tt) : t.name;
+            nowShown.add(t.id);
+            const label = tagName(t);
+            const cls = ['tag'];
+            if (t.spoiler) cls.push('spoil', spoil === 2 ? `sp${t.spoiler}` : '');
+            if (hitBy.has(t.id)) cls.push('hit');
+            if (fresh && shownBefore && !shownBefore.has(t.id)) cls.push('fresh');
             return h('a', {
-              href: `#/tag/${t.id}`,
-              class: `tag t${Math.min(3, Math.round(t.rating))} ${t.spoiler ? 'spoil' : ''} ${hitBy.has(t.id) ? 'hit' : ''}`,
-              title: `${label !== t.name ? `${t.name} · ` : ''}сила ${t.rating.toFixed(1)} из 3${t.spoiler ? ' · спойлер' : ''}${hitBy.has(t.id) ? ' · есть в вашем поиске' : ''}`,
+              href: `#/tag/${t.id}`, class: cls.join(' '), 'data-tag': t.id,
+              title: `${label !== t.name ? `${t.name} · ` : ''}сила ${t.rating.toFixed(1)} из 3${t.spoiler === 1 ? ' · мелкий спойлер' : t.spoiler === 2 ? ' · серьёзный спойлер' : ''}${hitBy.has(t.id) ? ' · есть в вашем поиске' : ''} · удерживайте для описания`,
             }, hitBy.has(t.id) ? '✓ ' : '', label);
           }));
       }).filter(Boolean);
       if (!groupsEl.length) return null;
       return h('div', { class: 'tag-cat' }, h('h3', {}, catRu(cat.name)), groupsEl);
     }));
+    shownBefore = nowShown;
   };
   renderTags();
+  const spoilerLegend = h('div', { class: 'spoil-legend muted small' });
+  const paintLegend = () => mount(spoilerLegend, spoil === 2 ? [
+    h('span', { class: 'tag' }, 'обычный'), h('span', { class: 'tag spoil sp1' }, 'мелкий спойлер'), h('span', { class: 'tag spoil sp2' }, 'серьёзный спойлер'),
+  ] : null);
+  paintLegend();
   const tagControls = h('div', { class: 'toolbar' },
-    h('label', { class: 'field inline' }, 'Спойлеры ', h('select', { onchange: e => { spoil = Number(e.target.value); renderTags(); } },
+    h('label', { class: 'field inline' }, 'Спойлеры ', h('select', { onchange: e => { spoil = Number(e.target.value); paintLegend(); renderTags(true); } },
       [['0', 'скрыть'], ['1', 'мелкие'], ['2', 'все']].map(([v, l]) => h('option', { value: v, selected: Number(v) === spoil }, l)))));
 
-  // description with spoiler blocks
+  // description with spoiler blocks (original or translated)
   const desc = h('div', { class: 'desc' });
-  for (const [i, part] of d.description.split(/\[\/?spoiler\]/).entries()) {
-    if (i % 2) desc.append(h('span', { class: 'spoiler', title: 'Спойлер — нажмите', onclick: e => e.currentTarget.classList.add('shown') }, part));
-    else desc.append(part);
-  }
+  const renderDesc = () => {
+    const parts = tr && descTr ? descTr : descParts;
+    mount(desc, parts.map((part, i) => (i % 2
+      ? h('span', { class: 'spoiler', title: 'Спойлер — нажмите', onclick: e => e.currentTarget.classList.add('shown') }, part)
+      : part)));
+  };
+  renderDesc();
+  if (tr) loadTranslations();
 
   // screenshots: sharp thumbnails, full picture in the viewer
   const shotList = d.screenshots.slice(0, 40);
@@ -734,14 +842,15 @@ export async function viewVn(root, id, params = new URLSearchParams()) {
         d.original && d.original !== d.title ? h('p', { class: 'muted' }, d.original) : null,
         h('dl', { class: 'meta' }, meta.flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, v)])),
         hlSummary,
-        h('div', { class: 'lang-line' }, h('span', { class: 'muted small' }, 'Языки: '), langBadges(d.langs, 30),
-          h('span', { class: 'muted small legend' }, ' сплошная — офиц., контур — фан-перевод, пунктир — машинный')),
+        h('div', { class: 'lang-line' }, h('span', { class: 'muted small' }, 'Языки: '), langBadges(d.langs, 30)),
+        langLegend(d.langs),
         markBox,
         h('div', { class: 'toolbar' }, h('a', { class: 'btn', href: d.vndb_url, target: '_blank', rel: 'noopener' }, 'VNDB ↗'),
           d.links.filter(l => ['wikidata', 'wp'].indexOf(l.site) < 0).slice(0, 4).map(l => h('a', { class: 'btn', href: l.url, target: '_blank', rel: 'noopener noreferrer' }, l.label, ' ↗'))))),
     where,
+    h('div', { class: 'tr-line' }, trBtn, trNote),
     d.description ? h('section', {}, h('h2', {}, 'Описание'), desc) : null,
-    h('section', {}, h('div', { class: 'section-head' }, h('h2', {}, 'Теги'), tagControls), tagBox),
+    h('section', {}, h('div', { class: 'section-head' }, h('h2', {}, 'Теги'), tagControls), spoilerLegend, tagBox),
     shots, rels, releasesBlock(d),
   );
 }
@@ -848,7 +957,11 @@ export async function viewSettings(root) {
     h('section', { class: 'panel form' }, h('h2', {}, 'Язык'),
       field('Предпочитаемые языки', text('langs', 'en, ru'), 'Коды через запятую по приоритету: en, ru, uk, es, de… Используются для названий и сортировки ссылок.'),
       field('Какие новеллы показывать', select('langMode', [['readable', 'Есть на любом языке, кроме японского/китайского/корейского'], ['list', 'Только на языках из списка выше'], ['any', 'Все, даже только на японском']])),
-      check('allowMtl', 'Учитывать машинные переводы')),
+      check('allowMtl', 'Учитывать машинные переводы'),
+      check('translate', 'Переводить описания и теги на русский', 'Машинный перевод (нужен интернет при первом показе, потом из кэша). На странице новеллы можно переключать «оригинал / перевод».')),
+    h('section', { class: 'panel form' }, h('h2', {}, 'Где играть'),
+      field('Показывать новеллы для', select('platform', [['any', 'Любой платформы'], ['pc', 'ПК (Windows, Linux, macOS)'], ['phone', 'Телефона (Android, iOS)']]),
+        'Действует на полки и поиск; в поиске можно переключить на месте.')),
     h('section', { class: 'panel form' }, h('h2', {}, 'Контент'),
       field('Спойлеры в тегах', select('spoiler', [['0', 'Скрывать'], ['1', 'Показывать мелкие'], ['2', 'Показывать все']])),
       check('hideCancelled', 'Скрывать отменённые проекты'),
@@ -863,14 +976,13 @@ export async function viewSettings(root) {
         ['auto', 'Всё автоматически (и полную загрузку тоже)'],
         ['manual', 'Только вручную']])),
       h('div', { class: 'toolbar' },
-        h('button', { class: 'btn', onclick: async () => { const m = await import('./app.js'); m.checkUpdates({ force: true, interactive: true }); } }, 'Проверить обновления'),
-        h('button', { class: 'btn', onclick: async () => { await api.sync(); toast('Подтягиваю новые релизы'); setTimeout(loadStatus, 800); } }, 'Подтянуть новые релизы'))),
+        h('button', { class: 'btn', onclick: async () => { const m = await import('./app.js'); m.checkUpdates({ force: true, interactive: true }); } }, 'Проверить новые новеллы и релизы VNDB'))),
     h('section', { class: 'panel form' }, h('h2', {}, 'Каталоги переводов и сообщества'), srcBox),
     IN_APP
       ? h('section', { class: 'panel form' }, h('h2', {}, 'Приложение'),
         h('p', {}, `VN Shelf для Android, версия ${APP_VERSION}. Новые версии публикуются в GitHub Releases.`),
         h('div', { class: 'toolbar' },
-          h('button', { class: 'btn', onclick: async () => { const m = await import('./app.js'); m.checkAppUpdate({ interactive: true }); } }, 'Проверить версию приложения'),
+          h('button', { class: 'btn primary', onclick: async () => { const m = await import('./app.js'); m.checkAppUpdate({ interactive: true }); } }, 'Проверить обновление приложения'),
           reset))
       : h('section', { class: 'panel form' }, h('h2', {}, 'Сервер'),
         field('Адрес сервера', text('apiBase', 'пусто = этот же сервер'), 'Нужно для мобильного приложения: например http://192.168.1.10:8080'),

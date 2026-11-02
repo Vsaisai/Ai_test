@@ -42,6 +42,15 @@ export function langBadges(langs, max = 4) {
   return wrap;
 }
 
+/** Legend for language badges, one line per style. With `langs`, only the styles present are listed. */
+export function langLegend(langs = null) {
+  const rows = [[0, 'официальный перевод или оригинал'], [1, 'фанатский перевод'], [2, 'машинный перевод']]
+    .filter(([k]) => !langs || langs.some(l => l.kind === k));
+  if (!rows.length) return null;
+  return h('ul', { class: 'lang-legend' }, rows.map(([k, text]) =>
+    h('li', {}, h('span', { class: `lang k${k}` }, 'EN'), h('span', { class: 'muted small' }, `— ${text}`))));
+}
+
 export function fmtLength(min) {
   if (!min) return '';
   if (min < 60) return `${min} мин`;
