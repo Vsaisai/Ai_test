@@ -3,9 +3,9 @@ import { api, img } from './api.js';
 import { settings, save, baseRequest, DEFAULTS, IN_APP, APP_VERSION, PLATFORM_GROUPS } from './store.js';
 import {
   h, card, cover, spinner, errorBox, toast, debounce, langBadges, fmtLength,
-  LANG_NAMES, PLATFORMS, MARKS, jobPanel, langLegend, tagDescription,
+  LANG_NAMES, PLATFORMS, MARKS, jobPanel, langLegend, tagDescription, richText, ruLabel,
 } from './ui.js';
-import { CURATED, ADULT, tagLabel, catRu, resolveGroup } from './taxonomy.js';
+import { CURATED, ADULT, tagLabel, catRu, resolveGroup, hasRu } from './taxonomy.js';
 import { openLightbox } from './lightbox.js';
 
 const SORTS = {
@@ -494,8 +494,9 @@ export async function viewTags(root, sub, params) {
       'Удерживайте тег, чтобы узнать, что он значит. Число — сколько новелл с этим тегом останется вместе с уже выбранными обязательными и исключёнными.'), groups);
   };
 
+  const lbl = t => (hasRu(t) ? tagLabel(t) : ruLabel(t.name));
   const treeRow = t => h('div', { class: 'tag-row' },
-    t.searchable ? tagChip(t, tagLabel(t), bar) : h('span', { class: 'tag-plain' }, tagLabel(t)),
+    t.searchable ? tagChip(t, lbl(t), bar) : h('span', { class: 'tag-plain' }, lbl(t)),
     h('a', { href: `#/tag/${t.id}`, class: 'tag-info', title: 'Описание тега' }, 'ⓘ'));
 
   const subtree = (t, depth, keep) => {
@@ -511,9 +512,9 @@ export async function viewTags(root, sub, params) {
     const current = tags.byId.get(Number(sub[1])) || roots[0];
     const subs = current.children.map(id => tags.byId.get(id)).filter(x => x && notAdult(x));
     mount(body,
-      h('div', { class: 'tabs small-tabs' }, roots.map(r => h('a', { href: `#/tags/all/${r.id}`, class: r.id === current.id ? 'on' : '' }, catRu(r.name)))),
+      h('div', { class: 'tabs small-tabs' }, roots.map(r => h('a', { href: `#/tags/all/${r.id}`, class: r.id === current.id ? 'on' : '' }, ruLabel(r.name)))),
       h('div', { class: 'tag-columns' }, subs.map(s => h('section', { class: 'tag-group' },
-        h('h3', {}, h('a', { href: `#/tag/${s.id}` }, catRu(s.name)), h('span', { class: 'count' }, s.vns || '')),
+        h('h3', {}, h('a', { href: `#/tag/${s.id}` }, ruLabel(s.name)), h('span', { class: 'count' }, s.vns || '')),
         h('div', {}, s.children.map(id => tags.byId.get(id)).filter(x => x && notAdult(x)).map(k => subtree(k, 1, notAdult)))))));
   };
 
@@ -564,9 +565,9 @@ export async function viewTag(root, id) {
     const kids = t.children.map(c => tags.byId.get(c)).filter(x => x && (adultOn() || x.cat !== 'ero'));
     mount(root,
       h('div', { class: 'page-head' },
-        h('div', { class: 'crumbs' }, t.path.slice(0, -1).map(pid => h('a', { href: `#/tag/${pid}` }, catRu(tags.byId.get(pid)?.name || String(pid))))),
-        h('h1', {}, label),
-        label !== t.name ? h('p', { class: 'muted' }, t.name) : null,
+        h('div', { class: 'crumbs' }, t.path.slice(0, -1).map(pid => h('a', { href: `#/tag/${pid}` }, ruLabel(tags.byId.get(pid)?.name || String(pid))))),
+        h('h1', {}, label === t.name ? ruLabel(t.name) : label),
+        label !== t.name || settings().translate ? h('p', { class: 'muted' }, t.name) : null,
         t.aliases.length ? h('p', { class: 'muted small' }, 'Также: ', t.aliases.join(', ')) : null,
         h('div', { class: 'toolbar' },
           h('a', { class: 'btn', href: `#/search?want=${t.id}` }, '~ Желательно'),
@@ -574,7 +575,7 @@ export async function viewTag(root, id) {
           h('a', { class: 'btn', href: `#/search?exclude=${t.id}` }, '− Исключить'))),
       t.description || t.examples?.length ? tagDescription(t) : null,
       kids.length ? h('div', { class: 'subtags' }, h('span', { class: 'muted' }, 'Подтеги: '),
-        kids.map(k => h('a', { class: 'pill', href: `#/tag/${k.id}` }, tagLabel(k), h('small', {}, ` ${k.vns}`)))) : null,
+        kids.map(k => h('a', { class: 'pill', href: `#/tag/${k.id}` }, hasRu(k) ? tagLabel(k) : ruLabel(k.name), h('small', {}, ` ${k.vns}`)))) : null,
       h('h2', {}, 'Новеллы с этим тегом'),
       resultGrid(offset => api.search({ ...baseRequest(), must: [String(t.id)], sort: 'votes', offset, limit: 48 }), { hl: [t.id] }),
     );
@@ -790,7 +791,7 @@ export async function viewVn(root, id, params = new URLSearchParams()) {
         const visible = g.tags.filter(t => (t.spoiler <= spoil || hitBy.has(t.id) && t.spoiler <= Math.max(spoil, 1)) && (showAdult || !t.ero));
         if (!visible.length) return null;
         visible.sort((a, b) => (hitBy.has(b.id) - hitBy.has(a.id)) || (b.rating - a.rating));
-        return h('div', { class: 'tag-line' }, h('span', { class: 'tag-sub' }, catRu(g.name)),
+        return h('div', { class: 'tag-line' }, h('span', { class: 'tag-sub' }, tr ? ruLabel(g.name) : g.name),
           visible.map(t => {
             nowShown.add(t.id);
             const label = tagName(t);
@@ -805,7 +806,7 @@ export async function viewVn(root, id, params = new URLSearchParams()) {
           }));
       }).filter(Boolean);
       if (!groupsEl.length) return null;
-      return h('div', { class: 'tag-cat' }, h('h3', {}, catRu(cat.name)), groupsEl);
+      return h('div', { class: 'tag-cat' }, h('h3', {}, tr ? ruLabel(cat.name) : catRu(cat.name)), groupsEl);
     }));
     shownBefore = nowShown;
   };
@@ -822,6 +823,7 @@ export async function viewVn(root, id, params = new URLSearchParams()) {
   // description with spoiler blocks (original or translated)
   const desc = h('div', { class: 'desc' });
   const renderDesc = () => {
+    if (!(tr && descTr) && d.description_parts) { mount(desc, richText(d.description_parts)); return; }
     const parts = tr && descTr ? descTr : descParts;
     mount(desc, parts.map((part, i) => (i % 2
       ? h('span', { class: 'spoiler', title: 'Спойлер — нажмите', onclick: e => e.currentTarget.classList.add('shown') }, part)

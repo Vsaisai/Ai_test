@@ -109,6 +109,8 @@ pub struct Detail {
     pub titles: Vec<Title>,
     pub aliases: Vec<String>,
     pub description: String,
+    /// The description split into text and links (spoiler markers stay inside the text).
+    pub description_parts: Vec<DescPart>,
     pub developers: Vec<String>,
     pub length_votes: u32,
     pub tags: Vec<TagCategory>,
@@ -225,7 +227,7 @@ pub fn classify(
                 continue;
             }
             let site = if kind == SourceKind::FanPatch && s == "website" {
-                "Translator/fan site".to_string()
+                "Сайт переводчиков".to_string()
             } else {
                 l.label.clone()
             };
@@ -281,7 +283,6 @@ pub fn fallback(title: &str) -> Vec<Source> {
     ]
 }
 
-/// Cleaned description (VNDB BBCode stripped, spoilers kept in `[spoiler]` markers for the UI).
 /// A screenshot linked from a tag description ("Example 1", "NSFW Example 2").
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct TagExample {
@@ -297,7 +298,15 @@ pub struct DescPart {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tag: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub vn: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+}
+
+impl DescPart {
+    fn is_text(&self) -> bool {
+        self.tag.is_none() && self.vn.is_none() && self.url.is_none()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -314,12 +323,17 @@ fn screenshot_path(url: &str) -> Option<String> {
     p.starts_with("sf/").then(|| p.to_string())
 }
 
-fn tag_link(url: &str) -> Option<u32> {
+/// `/g12`, `https://vndb.org/v5` -> ('g', 12)
+fn vndb_link(url: &str) -> Option<(char, u32)> {
     let rest = url
         .trim_start_matches("https://")
         .trim_start_matches("http://")
+        .trim_start_matches("www.")
         .trim_start_matches("vndb.org");
-    rest.strip_prefix("/g")?.trim_end_matches('/').parse().ok()
+    let rest = rest.strip_prefix('/')?.trim_end_matches('/');
+    let kind = rest.chars().next()?;
+    let id = rest[1..].split(['#', '?', '/', '.']).next()?.parse().ok()?;
+    Some((kind, id))
 }
 
 /// Split a VNDB tag description into readable parts: screenshot links ("Example 1") become
@@ -327,17 +341,22 @@ fn tag_link(url: &str) -> Option<u32> {
 pub fn tag_description(raw: &str) -> TagDescription {
     let mut parts: Vec<DescPart> = Vec::new();
     let mut examples = Vec::new();
-    let push = |parts: &mut Vec<DescPart>, text: &str, tag: Option<u32>, url: Option<String>| {
+    let push = |parts: &mut Vec<DescPart>, text: &str, link: Option<(char, u32)>, url: Option<String>| {
         if text.is_empty() {
             return;
         }
-        if tag.is_none() && url.is_none() {
-            if let Some(last) = parts.last_mut().filter(|p| p.tag.is_none() && p.url.is_none()) {
+        let (tag, vn) = match link {
+            Some(('g', id)) => (Some(id), None),
+            Some(('v', id)) => (None, Some(id)),
+            _ => (None, None),
+        };
+        if tag.is_none() && vn.is_none() && url.is_none() {
+            if let Some(last) = parts.last_mut().filter(|p| p.is_text()) {
                 last.text.push_str(text);
                 return;
             }
         }
-        parts.push(DescPart { text: text.to_string(), tag, url });
+        parts.push(DescPart { text: text.to_string(), tag, vn, url });
     };
     let mut rest = raw;
     loop {
@@ -360,16 +379,18 @@ pub fn tag_description(raw: &str) -> TagDescription {
         rest = &after[end + 6..];
         if let Some(path) = screenshot_path(url) {
             examples.push(TagExample { path, nsfw: text.to_lowercase().contains("nsfw") });
-        } else if let Some(id) = tag_link(url) {
-            push(&mut parts, &text, Some(id), None);
+        } else if let Some(l @ ('g' | 'v', _)) = vndb_link(url) {
+            push(&mut parts, &text, Some(l), None);
         } else if url.starts_with("http") {
             push(&mut parts, &text, None, Some(url.to_string()));
+        } else if url.starts_with('/') && vndb_link(url).is_some() {
+            push(&mut parts, &text, None, Some(format!("https://vndb.org{url}")));
         } else {
             push(&mut parts, &text, None, None);
         }
     }
     // tidy whitespace left by removed example links: no blank-ish lines, at most one empty line
-    for p in parts.iter_mut().filter(|p| p.tag.is_none() && p.url.is_none()) {
+    for p in parts.iter_mut().filter(|p| p.is_text()) {
         let mut t: String = p
             .text
             .split('\n')
@@ -403,6 +424,7 @@ fn clean_bbcode_keep(s: &str) -> String {
     format!("{}{}{}", &s[..lead], core, &s[s.len() - trail..])
 }
 
+/// Cleaned description (VNDB BBCode stripped, spoilers kept in `[spoiler]` markers for the UI).
 pub fn clean_bbcode(s: &str) -> String {
     const KNOWN: &[&str] = &["b", "i", "u", "s", "url", "quote", "raw", "code"];
     let mut out = String::new();
@@ -652,7 +674,7 @@ pub fn detail(
                 .unwrap_or(name);
             sources.push(Source {
                 kind: SourceKind::Direct,
-                site: format!("{name} (homepage)"),
+                site: format!("{name} — сайт"),
                 url,
                 release: None,
                 langs: vec![],
@@ -740,6 +762,7 @@ pub fn detail(
             .map(String::from)
             .collect(),
         description: clean_bbcode(&description),
+        description_parts: tag_description(&description).parts,
         developers: v
             .developers
             .iter()
@@ -833,6 +856,10 @@ mod tests {
         assert_eq!(d.parts[1].tag, Some(398));
         assert_eq!(d.parts[3].url.as_deref(), Some("https://en.wikipedia.org/wiki/X"));
         assert!(!d.text.contains("Example"));
+        let v = tag_description("Sequel to [url=/v17]Ever17[/url], see [url=/p12]the studio[/url]. [spoiler]x[/spoiler]");
+        assert_eq!(v.parts[1].vn, Some(17));
+        assert_eq!(v.parts[3].url.as_deref(), Some("https://vndb.org/p12"));
+        assert!(v.text.ends_with("[spoiler]x[/spoiler]"));
     }
 
     #[test]

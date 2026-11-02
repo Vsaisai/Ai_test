@@ -513,7 +513,9 @@ async fn translate(State(s): St, Json(req): Json<TranslateReq>) -> ApiResult<Val
     let path = s.data_dir.join("user.sqlite");
     let out = blocking(move || {
         let conn = vndb_core::db::open_user(&path)?;
-        Ok(vndb_core::translate::translate(&conn, &req.texts, &req.to)?)
+        vndb_core::translate::translate(&conn, &req.texts, &req.to).map_err(|e| {
+            ApiError(StatusCode::SERVICE_UNAVAILABLE, format!("переводчик недоступен: {e:#}"))
+        })
     })
     .await?;
     Ok(Json(json!({ "translations": out })))
@@ -990,9 +992,9 @@ async fn vn_prices(
                 Ok(v) => {
                     let e = &v[&appid];
                     if !e["success"].as_bool().unwrap_or(false) {
-                        "unavailable".to_string()
+                        "нет в вашем регионе".to_string()
                     } else if e["data"]["is_free"].as_bool().unwrap_or(false) {
-                        "free".to_string()
+                        "бесплатно".to_string()
                     } else if let Some(p) = e["data"]["price_overview"]["final_formatted"].as_str()
                     {
                         let d = e["data"]["price_overview"]["discount_percent"]
@@ -1004,12 +1006,12 @@ async fn vn_prices(
                             p.to_string()
                         }
                     } else {
-                        "no price".to_string()
+                        "цена не указана".to_string()
                     }
                 }
-                Err(_) => "?".into(),
+                Err(_) => "цену не узнать".into(),
             },
-            Err(_) => "offline".into(),
+            Err(_) => "нет связи".into(),
         };
         out.push(json!({ "url": url, "price": price }));
     }
