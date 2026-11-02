@@ -114,8 +114,11 @@ jobs:
             echo "$PUBLIC_REPO already has $TAG"
             exit 0
           fi
-          gh release create "$TAG" target/apk/*.apk \
-            --repo "$PUBLIC_REPO" \
-            --title "VN Shelf $VNSHELF_VERSION для Android" \
-            --notes-file mobile/RELEASE_NOTES.md
-          echo "Published https://github.com/$PUBLIC_REPO/releases/tag/$TAG"
+          if gh release create "$TAG" target/apk/*.apk \
+              --repo "$PUBLIC_REPO" \
+              --title "VN Shelf $VNSHELF_VERSION для Android" \
+              --notes-file mobile/RELEASE_NOTES.md; then
+            echo "Published https://github.com/$PUBLIC_REPO/releases/tag/$TAG"
+          else
+            echo "::warning::Could not publish to $PUBLIC_REPO. VNDB_SECRET needs access to this repository with Contents: Read and write."
+          fi
