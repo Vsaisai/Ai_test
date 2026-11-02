@@ -589,22 +589,22 @@ function updateTokenField() {
   const note = h('p', { class: 'muted small' }, 'Проверяю…');
   const refresh = () => api.appUpdate().then(u => {
     note.textContent = u.status === 'ok'
-      ? (u.has_token ? 'Доступ к релизам есть (токен работает).' : 'Доступ к релизам есть.')
+      ? (u.repo === 'public' || !u.has_token ? 'Обновления доступны, токен не нужен.' : 'Доступ к релизам есть (токен работает).')
       : u.status === 'bad_token' ? 'Токен не подошёл: истёк или нет доступа к репозиторию.'
-        : 'Репозиторий закрыт: без токена приложение не видит новые версии.';
+        : 'Релизы не найдены.';
   }).catch(e => { note.textContent = `Нет связи с GitHub: ${e.message}`; });
   const saveTok = async val => {
     try { await api.setUpdateToken(val); input.value = ''; toast(val ? 'Токен сохранён' : 'Токен удалён'); refresh(); } catch (e) { toast(e.message); }
   };
   refresh();
   return h('div', { class: 'field' },
-    h('label', {}, 'Токен GitHub для обновлений'),
+    h('label', {}, 'Токен GitHub (необязательно)'),
     h('div', { class: 'row' }, input,
       h('button', { class: 'btn', type: 'button', onclick: () => saveTok(input.value.trim()) }, 'Сохранить'),
       h('button', { class: 'btn', type: 'button', onclick: () => saveTok('') }, 'Сбросить')),
     note,
-    h('p', { class: 'muted small' }, 'Нужен, только пока репозиторий закрыт. GitHub → Settings → Developer settings → Fine-grained tokens: ' +
-      'доступ только к Vsaisai/Ai_test, право Contents: Read-only. Токен хранится только на этом устройстве.'));
+    h('p', { class: 'muted small' }, 'Обычно не нужен: новые версии публикуются в открытом репозитории Vsaisai/vnshelf-releases. ' +
+      'Токен нужен только для сборок из закрытого репозитория с кодом. Хранится только на этом устройстве.'));
 }
 
 // ---------- VN page ----------

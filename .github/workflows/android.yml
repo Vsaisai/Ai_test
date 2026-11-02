@@ -65,8 +65,6 @@ jobs:
 
       - name: Build APK
         env:
-          # read-only token so the app sees releases while the repository is private (optional)
-          VNSHELF_UPDATE_TOKEN: ${{ secrets.VNSHELF_UPDATE_TOKEN }}
           VNSHELF_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           VNSHELF_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           VNSHELF_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
@@ -93,3 +91,31 @@ jobs:
             --target "$GITHUB_SHA" \
             --title "VN Shelf $VNSHELF_VERSION для Android" \
             --notes-file mobile/RELEASE_NOTES.md
+
+      # The code repository is private, so the app looks for updates in a public repository that
+      # holds only release builds. VNDB_SECRET: fine-grained token, access to that repository only,
+      # Contents: Read and write. It is used here only and never ends up in the APK.
+      - name: Publish to the public releases repository
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.VNDB_SECRET }}
+          PUBLIC_REPO: Vsaisai/vnshelf-releases
+        run: |
+          TAG="mobile-v$VNSHELF_VERSION"
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::Secret VNDB_SECRET is not set: the public releases repository is not updated."
+            exit 0
+          fi
+          if ! gh repo view "$PUBLIC_REPO" > /dev/null 2>&1; then
+            echo "::warning::$PUBLIC_REPO is not reachable with VNDB_SECRET: create it (public, with a README) and give the token access to it (Contents: Read and write)."
+            exit 0
+          fi
+          if gh release view "$TAG" --repo "$PUBLIC_REPO" > /dev/null 2>&1; then
+            echo "$PUBLIC_REPO already has $TAG"
+            exit 0
+          fi
+          gh release create "$TAG" target/apk/*.apk \
+            --repo "$PUBLIC_REPO" \
+            --title "VN Shelf $VNSHELF_VERSION для Android" \
+            --notes-file mobile/RELEASE_NOTES.md
+          echo "Published https://github.com/$PUBLIC_REPO/releases/tag/$TAG"
