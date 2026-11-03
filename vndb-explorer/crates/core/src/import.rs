@@ -91,17 +91,26 @@ impl<R: Read> Read for Counting<'_, R> {
 /// Download the dump into `dir`, resuming after dropped connections (mobile networks, VPNs,
 /// the phone going to sleep). A partial file is kept between attempts and between runs, and is
 /// only resumed if it belongs to the same dump (the dated file name behind `-latest`).
+/// Room needed on top of the dump to build the new database next to the old one.
+const IMPORT_HEADROOM: u64 = 450 * 1024 * 1024;
+
 pub fn download(url: &str, dir: &Path, rep: &Reporter) -> Result<std::path::PathBuf> {
     let progress = |m: &str| rep.log(m);
     use std::io::Write;
     std::fs::create_dir_all(dir)?;
     let http = crate::http::blocking_client(None)?;
     // `-latest` redirects to the dated file: resolve it so a resume never mixes two dumps.
-    let probe = http
-        .get(url)
-        .header("Range", "bytes=0-0")
-        .send()
-        .context("cannot reach dl.vndb.org")?;
+    let mut attempt = 0u64;
+    let probe = loop {
+        match http.get(url).header("Range", "bytes=0-0").send() {
+            Ok(r) => break r,
+            Err(e) if attempt == 2 => {
+                return Err(anyhow::Error::new(e).context("нет связи с dl.vndb.org"))
+            }
+            Err(_) => std::thread::sleep(std::time::Duration::from_secs(2 + attempt * 3)),
+        }
+        attempt += 1;
+    };
     let real = probe.url().to_string();
     let name = real
         .rsplit('/')
@@ -127,6 +136,19 @@ pub fn download(url: &str, dir: &Path, rep: &Reporter) -> Result<std::path::Path
     }
     let part = dir.join(format!("{name}.part"));
     let done = dir.join(&name);
+    // the download plus building the new database need room: check before spending minutes
+    if let (Some(free), Some(t)) = (crate::db::free_space(dir), total) {
+        let have = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0)
+            + std::fs::metadata(&done).map(|m| m.len()).unwrap_or(0);
+        let need = t.saturating_sub(have) + IMPORT_HEADROOM;
+        if free < need {
+            bail!(
+                "недостаточно места: нужно около {} МБ, свободно {} МБ. Освободите место и запустите загрузку ещё раз",
+                need / 1_048_576 + 1,
+                free / 1_048_576
+            );
+        }
+    }
     if done.exists()
         && total
             .map(|t| {
@@ -211,7 +233,7 @@ pub fn download(url: &str, dir: &Path, rep: &Reporter) -> Result<std::path::Path
             f.flush()?;
             if let Some(t) = total {
                 if got < t {
-                    bail!("connection closed at {:.0} of {:.0} MB", mb(got), mb(t));
+                    bail!("соединение закрылось на {:.0} из {:.0} МБ", mb(got), mb(t));
                 }
             }
             Ok(())
@@ -221,7 +243,7 @@ pub fn download(url: &str, dir: &Path, rep: &Reporter) -> Result<std::path::Path
             Err(e) => {
                 attempt += 1;
                 if attempt >= 10 {
-                    return Err(e.context("download failed after 10 attempts; press the button again to continue where it stopped"));
+                    return Err(e.context("загрузка прервалась 10 раз подряд; нажмите кнопку ещё раз — она продолжится с того же места"));
                 }
                 let wait = (2u64 << attempt.min(4)).min(30);
                 progress(&format!("Connection lost ({e:#}), retrying in {wait} s"));
@@ -464,7 +486,7 @@ fn read_archive<R: Read>(reader: R, c: &Connection, progress: &dyn Fn(&str)) -> 
         }
     }
     if !seen_vn {
-        bail!("the archive does not look like a VNDB database dump");
+        bail!("файл не похож на дамп базы VNDB");
     }
     Ok(timestamp)
 }

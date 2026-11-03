@@ -7,7 +7,7 @@
 
 use crate::db;
 use crate::progress::{Progress, Reporter};
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -70,25 +70,43 @@ impl Api {
     }
 
     fn post(&self, endpoint: &str, body: &Value) -> Result<Value> {
+        // mobile networks drop connections: retry network errors, 429 and 5xx a few times
+        let mut last = None;
         for attempt in 0..6u64 {
-            let r = self
+            let wait = Duration::from_secs(2 + attempt * 3);
+            let r = match self
                 .http
                 .post(format!("{API}/{endpoint}"))
                 .json(body)
                 .send()
-                .context("VNDB API request failed")?;
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    last = Some(anyhow::Error::new(e).context("нет связи с VNDB"));
+                    std::thread::sleep(wait);
+                    continue;
+                }
+            };
             let status = r.status();
-            if status.as_u16() == 429 {
-                std::thread::sleep(Duration::from_secs(3 + attempt * 3));
+            if status.as_u16() == 429 || status.is_server_error() {
+                last = Some(anyhow::anyhow!("VNDB отвечает HTTP {}", status.as_u16()));
+                std::thread::sleep(wait);
                 continue;
             }
-            let text = r.text()?;
+            let text = match r.text() {
+                Ok(t) => t,
+                Err(e) => {
+                    last = Some(anyhow::Error::new(e).context("связь с VNDB оборвалась"));
+                    std::thread::sleep(wait);
+                    continue;
+                }
+            };
             if !status.is_success() {
-                bail!("VNDB API error {status}: {}", text.trim());
+                bail!("VNDB API: ошибка {status}: {}", text.trim());
             }
             return Ok(serde_json::from_str(&text)?);
         }
-        bail!("VNDB API is throttling requests, try again later")
+        Err(last.unwrap_or_else(|| anyhow::anyhow!("VNDB не отвечает, попробуйте позже")))
     }
 
     fn count(&self, endpoint: &str, filters: Value) -> Result<u64> {

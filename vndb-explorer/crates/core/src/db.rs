@@ -141,3 +141,21 @@ pub fn open_user(path: &Path) -> Result<Connection> {
     )?;
     Ok(c)
 }
+
+/// Free bytes on the file system holding `dir` (None where unknown).
+#[cfg(unix)]
+pub fn free_space(dir: &std::path::Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `c` is a valid NUL-terminated path and `st` a properly sized out-parameter.
+    if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
+        return None;
+    }
+    Some(st.f_bavail as u64 * st.f_frsize as u64)
+}
+
+#[cfg(not(unix))]
+pub fn free_space(_dir: &std::path::Path) -> Option<u64> {
+    None
+}

@@ -1,6 +1,7 @@
 // Small DOM helpers and shared components.
 import { img, api } from './api.js';
 import { catRu } from './taxonomy.js';
+import { humanError } from './errors.js';
 import { settings } from './store.js';
 
 export function h(tag, attrs = {}, ...children) {
@@ -123,7 +124,7 @@ export function spinner(text = 'Загрузка…') {
 }
 
 export function errorBox(e, retry) {
-  return h('div', { class: 'error' }, h('p', {}, '⚠️ ', e.message || String(e)), retry && h('button', { class: 'btn', onclick: retry }, 'Повторить'));
+  return h('div', { class: 'error' }, h('p', {}, '⚠️ ', humanError(e.message || String(e))), retry && h('button', { class: 'btn', onclick: retry }, 'Повторить'));
 }
 
 export function toast(text, ms = 2200) {
@@ -164,7 +165,7 @@ export function jobPanel(job, { compact = false, link = null } = {}) {
   if (job.error) {
     return h('div', { class: 'job error-job' },
       h('div', { class: 'job-head' }, h('b', {}, `${title}: ошибка`)),
-      h('p', { class: 'small' }, job.error),
+      h('p', { class: 'small' }, humanError(job.error)),
       job.kind === 'import' ? h('p', { class: 'muted small' }, 'Нажмите кнопку ещё раз — скачивание продолжится с места обрыва.') : null);
   }
   if (!job.running) return h('div', { class: 'job' }, h('div', { class: 'job-head' }, h('b', {}, `${title}: готово`)));

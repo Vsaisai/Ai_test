@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use vndb_core::search::{Card, SearchRequest, Sort};
 use vndb_core::shelves::{self, Shelves};
 use vndb_core::sources::Sources;
@@ -172,26 +172,96 @@ pub struct AppState {
     pub http: reqwest::Client,
 }
 
+/// Open the personal database; a damaged file is kept as `user.sqlite.broken-<time>` and a new
+/// one is created, so the app still starts.
+fn open_user_or_recover(path: &std::path::Path) -> anyhow::Result<Connection> {
+    match vndb_core::db::open_user(path) {
+        Ok(c) => Ok(c),
+        Err(e) if path.exists() => {
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            eprintln!(
+                "user.sqlite cannot be opened ({e:#}); keeping it as user.sqlite.broken-{stamp}"
+            );
+            std::fs::rename(path, path.with_extension(format!("sqlite.broken-{stamp}")))?;
+            vndb_core::db::open_user(path)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Keep the image cache under `max` bytes: delete the least recently written files down to 3/4.
+pub fn prune_image_cache(dir: &std::path::Path, max: u64) {
+    let mut files = Vec::new();
+    let mut total = 0u64;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let Ok(m) = e.metadata() else { continue };
+            if m.is_dir() {
+                stack.push(e.path());
+            } else {
+                total += m.len();
+                let t = m.modified().unwrap_or(std::time::UNIX_EPOCH);
+                files.push((t, m.len(), e.path()));
+            }
+        }
+    }
+    if total <= max {
+        return;
+    }
+    files.sort();
+    let target = max / 4 * 3;
+    for (_, len, path) in files {
+        if total <= target {
+            break;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            total -= len;
+        }
+    }
+    eprintln!("Image cache trimmed to {} MB", total / 1_048_576);
+}
+
+/// Image cache limit (covers, screenshots, tag examples).
+pub const IMAGE_CACHE_MAX: u64 = 300 * 1024 * 1024;
+
 impl AppState {
     pub fn new(data_dir: PathBuf) -> anyhow::Result<Self> {
         let db = data_dir.join("catalog.sqlite");
         let catalog = if db.exists() {
             let t = std::time::Instant::now();
-            let c = Catalog::open(&db)?;
-            eprintln!(
-                "Loaded {} visual novels in {:.1?}",
-                c.vns.len(),
-                t.elapsed()
-            );
-            Some(Arc::new(c))
+            match Catalog::open(&db) {
+                Ok(c) => {
+                    eprintln!(
+                        "Loaded {} visual novels in {:.1?}",
+                        c.vns.len(),
+                        t.elapsed()
+                    );
+                    Some(Arc::new(c))
+                }
+                Err(e) => {
+                    // a damaged database must not brick the app: put it aside and offer a new download
+                    eprintln!("The catalog cannot be opened ({e:#}); it is moved to catalog.sqlite.broken");
+                    let _ = std::fs::rename(&db, db.with_extension("sqlite.broken"));
+                    None
+                }
+            }
         } else {
             eprintln!("No database yet: open the web UI and press \"Download database\", or run `vndb-web import`.");
             None
         };
+        let img = data_dir.join("img");
+        std::thread::spawn(move || prune_image_cache(&img, IMAGE_CACHE_MAX));
         Ok(Self {
             web_dir: None,
             shelves: RwLock::new(Shelves::load(&data_dir)?),
-            user: Mutex::new(vndb_core::db::open_user(&data_dir.join("user.sqlite"))?),
+            user: Mutex::new(open_user_or_recover(&data_dir.join("user.sqlite"))?),
             catalog: RwLock::new(catalog),
             import: Mutex::new(JobStatus::default()),
             sources: RwLock::new(Sources::load(&data_dir)?),
@@ -205,28 +275,71 @@ impl AppState {
     }
 
     pub fn ready(&self) -> bool {
-        self.catalog.read().unwrap().is_some()
+        self.catalog
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some()
     }
 
     fn cat(&self) -> Result<Arc<Catalog>, ApiError> {
-        self.catalog.read().unwrap().clone().ok_or_else(|| {
-            ApiError(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "database is not imported yet".into(),
-            )
-        })
+        self.catalog
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .ok_or_else(|| {
+                ApiError(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "database is not imported yet".into(),
+                )
+            })
     }
 
     fn marks(&self) -> HashMap<String, String> {
-        let c = self.user.lock().unwrap();
-        let mut st = c.prepare("SELECT vid, status FROM marks").unwrap();
+        let c = self.user.lock().unwrap_or_else(PoisonError::into_inner);
+        let Ok(mut st) = c.prepare("SELECT vid, status FROM marks") else {
+            return HashMap::new();
+        };
         st.query_map([], |r| {
             Ok((format!("v{}", r.get::<_, u32>(0)?), r.get::<_, String>(1)?))
         })
-        .unwrap()
-        .filter_map(Result::ok)
-        .collect()
+        .map(|rows| rows.filter_map(Result::ok).collect())
+        .unwrap_or_default()
     }
+}
+
+/// Other web pages open in the same browser must not drive the local server (read or change
+/// "My lists", start downloads): reject cross-site requests and DNS-rebinding hosts.
+async fn same_origin_only(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let headers = req.headers();
+    let host = headers
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let host_name = host.rsplit_once(':').map_or(host.as_str(), |(h, _)| h);
+    // the UI is opened by IP or as localhost; a domain name pointing here is a rebinding attempt
+    let host_ok = host_name == "localhost"
+        || host_name.ends_with(".local")
+        || (!host_name.is_empty() && !host_name.contains('.'))
+        || host_name
+            .trim_matches(|c| c == '[' || c == ']')
+            .parse::<std::net::IpAddr>()
+            .is_ok();
+    let origin_ok = match headers.get(header::ORIGIN).and_then(|o| o.to_str().ok()) {
+        None => true,
+        Some(o) => {
+            let o = o.to_ascii_lowercase();
+            o == format!("http://{host}") || o == format!("https://{host}")
+        }
+    };
+    let cross_site = headers
+        .get("sec-fetch-site")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v == "cross-site");
+    if !host_ok || !origin_ok || (cross_site && req.uri().path().starts_with("/api/")) {
+        return (StatusCode::FORBIDDEN, "cross-site request blocked").into_response();
+    }
+    next.run(req).await
 }
 
 pub struct ApiError(StatusCode, String);
@@ -282,7 +395,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/my/:id", put(set_mark).delete(delete_mark))
         .route("/img/*path", get(image))
         .fallback(static_file)
-        .layer(tower_http::cors::CorsLayer::permissive())
+        .layer(axum::middleware::from_fn(same_origin_only))
         .layer(tower_http::compression::CompressionLayer::new())
         .with_state(state)
 }
@@ -290,8 +403,16 @@ pub fn router(state: Arc<AppState>) -> Router {
 // ---------- status / import ----------
 
 async fn status(State(s): St) -> Json<Value> {
-    let imp = s.import.lock().unwrap().clone();
-    let cat = s.catalog.read().unwrap().clone();
+    let imp = s
+        .import
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    let cat = s
+        .catalog
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
     Json(json!({
         "ready": cat.is_some(),
         "vns": cat.as_ref().map(|c| c.vns.len()),
@@ -301,11 +422,6 @@ async fn status(State(s): St) -> Json<Value> {
         "import": imp,
         "version": env!("CARGO_PKG_VERSION"),
     }))
-}
-
-#[derive(Deserialize, Default)]
-struct ImportReq {
-    file: Option<String>,
 }
 
 /// Run `work` in a background thread as the single active job. `work` returns true when the
@@ -318,7 +434,7 @@ pub fn start_job(
         + 'static,
 ) -> bool {
     {
-        let mut st = state.import.lock().unwrap();
+        let mut st = state.import.lock().unwrap_or_else(PoisonError::into_inner);
         if st.running {
             return false;
         }
@@ -335,7 +451,7 @@ pub fn start_job(
     std::thread::spawn(move || {
         let log = |m: &str| {
             eprintln!("{m}");
-            let mut st = state.import.lock().unwrap();
+            let mut st = state.import.lock().unwrap_or_else(PoisonError::into_inner);
             st.log.push(m.to_string());
             let n = st.log.len();
             if n > 300 {
@@ -343,26 +459,44 @@ pub fn start_job(
             }
         };
         let prog = |p: &vndb_core::progress::Progress| {
-            let mut st = state.import.lock().unwrap();
+            let mut st = state.import.lock().unwrap_or_else(PoisonError::into_inner);
             let kind = st.kind.clone();
             let mut tr = st.track.clone();
             st.progress = Some(progress_view(&kind, p, &mut tr));
             st.track = tr;
         };
         let rep = vndb_core::progress::Reporter::new(&log, &prog);
-        let res = work(&state, &rep).and_then(|reload| {
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&state, &rep)))
+            .unwrap_or_else(|p| {
+                let msg = p
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
+                    .unwrap_or_else(|| "unknown".into());
+                Err(anyhow::anyhow!("внутренняя ошибка: {msg}"))
+            });
+        let res = res.and_then(|reload| {
             if reload {
                 log("Loading catalog");
-                let steps =
-                    vndb_core::progress::stages_of(&state.import.lock().unwrap().kind).len() as u32;
+                let steps = vndb_core::progress::stages_of(
+                    &state
+                        .import
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .kind,
+                )
+                .len() as u32;
                 rep.stage("load", steps, steps);
                 let c = Catalog::open(&state.data_dir.join("catalog.sqlite"))?;
-                *state.catalog.write().unwrap() = Some(Arc::new(c));
+                *state
+                    .catalog
+                    .write()
+                    .unwrap_or_else(PoisonError::into_inner) = Some(Arc::new(c));
             }
             Ok(())
         });
-        *state.updates.lock().unwrap() = None;
-        let mut st = state.import.lock().unwrap();
+        *state.updates.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        let mut st = state.import.lock().unwrap_or_else(PoisonError::into_inner);
         st.running = false;
         st.finished = true;
         match res {
@@ -381,6 +515,8 @@ pub fn start_import(state: Arc<AppState>, file: Option<PathBuf>) -> bool {
             None => vndb_core::import::Source::Url(vndb_core::import::DUMP_URL),
         };
         vndb_core::import::import(src, &db, log)?;
+        // a database put aside as damaged is no longer needed
+        let _ = std::fs::remove_file(db.with_extension("sqlite.broken"));
         Ok(true)
     })
 }
@@ -394,7 +530,11 @@ pub fn start_sync(state: Arc<AppState>) -> bool {
 
 pub fn start_sources_refresh(state: Arc<AppState>) -> bool {
     start_job(state, "sources", |st, log| {
-        let defs = st.sources.read().unwrap().clone();
+        let defs = st
+            .sources
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
         // separate connection: indexing must not block the UI's user database lock
         let conn = vndb_core::db::open_user(&st.data_dir.join("user.sqlite"))?;
         log.stage("sources", 1, 1);
@@ -409,8 +549,8 @@ pub fn start_sources_refresh(state: Arc<AppState>) -> bool {
 /// Refresh third-party indexes in the background when they are missing or older than a week.
 pub fn maybe_refresh_sources(state: Arc<AppState>) {
     let stale = {
-        let defs = state.sources.read().unwrap();
-        let user = state.user.lock().unwrap();
+        let defs = state.sources.read().unwrap_or_else(PoisonError::into_inner);
+        let user = state.user.lock().unwrap_or_else(PoisonError::into_inner);
         vndb_core::sources::index_age_days(&defs, &user)
             .map(|d| d > 7.0)
             .unwrap_or(true)
@@ -420,9 +560,9 @@ pub fn maybe_refresh_sources(state: Arc<AppState>) {
     }
 }
 
-async fn import(State(s): St, body: Option<Json<ImportReq>>) -> Json<Value> {
-    let file = body.and_then(|b| b.0.file).map(PathBuf::from);
-    let started = start_import(s, file);
+async fn import(State(s): St) -> Json<Value> {
+    // the HTTP API always downloads the official dump; local files are for the CLI only
+    let started = start_import(s, None);
     Json(json!({ "started": started }))
 }
 
@@ -439,7 +579,12 @@ async fn updates(State(s): St, Query(q): Query<UpdatesQ>) -> ApiResult<Value> {
     }
     let force = matches!(q.force.as_deref(), Some("1" | "true" | "yes"));
     if !force {
-        if let Some((at, v)) = s.updates.lock().unwrap().clone() {
+        if let Some((at, v)) = s
+            .updates
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+        {
             if at.elapsed() < std::time::Duration::from_secs(6 * 3600) {
                 return Ok(Json(v));
             }
@@ -454,7 +599,8 @@ async fn updates(State(s): St, Query(q): Query<UpdatesQ>) -> ApiResult<Value> {
     })
     .await?;
     let v = json!({ "ready": true, "check": check });
-    *s.updates.lock().unwrap() = Some((std::time::Instant::now(), v.clone()));
+    *s.updates.lock().unwrap_or_else(PoisonError::into_inner) =
+        Some((std::time::Instant::now(), v.clone()));
     Ok(Json(v))
 }
 
@@ -463,8 +609,12 @@ async fn sync(State(s): St) -> Json<Value> {
 }
 
 async fn sources_info(State(s): St) -> ApiResult<Value> {
-    let defs = s.sources.read().unwrap().clone();
-    let u = s.user.lock().unwrap();
+    let defs = s
+        .sources
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    let u = s.user.lock().unwrap_or_else(PoisonError::into_inner);
     let mut st = u
         .prepare("SELECT source, fetched_at, entries FROM source_meta")
         .map_err(anyhow::Error::from)?;
@@ -920,7 +1070,11 @@ impl Default for ShelvesReq {
 async fn shelves_overview(State(s): St, body: Option<Json<ShelvesReq>>) -> ApiResult<Value> {
     let req = body.map(|b| b.0).unwrap_or_default();
     let c = s.cat()?;
-    let shelves = s.shelves.read().unwrap().clone();
+    let shelves = s
+        .shelves
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
     let marks = s.marks();
     let out = blocking(move || {
         let mut base = req.base.clone();
@@ -1012,14 +1166,14 @@ async fn shelf_page(
 }
 
 async fn shelves_config(State(s): St) -> Json<Value> {
-    Json(serde_json::to_value(&*s.shelves.read().unwrap()).unwrap())
+    Json(serde_json::to_value(&*s.shelves.read().unwrap_or_else(PoisonError::into_inner)).unwrap())
 }
 
 async fn save_shelves_config(State(s): St, Json(v): Json<Shelves>) -> ApiResult<Value> {
     let text = serde_json::to_string_pretty(&v).unwrap();
     std::fs::write(s.data_dir.join("shelves.json"), text)
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    *s.shelves.write().unwrap() = v;
+    *s.shelves.write().unwrap_or_else(PoisonError::into_inner) = v;
     Ok(Json(json!({ "saved": true })))
 }
 
@@ -1077,7 +1231,7 @@ async fn vn_detail(
     let d = blocking(move || Ok(vndb_core::detail::detail(&c, vid, &order, any)?)).await?;
     let d = d.ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "no such VN".into()))?;
     let mut v = serde_json::to_value(&d).unwrap();
-    let u = s.user.lock().unwrap();
+    let u = s.user.lock().unwrap_or_else(PoisonError::into_inner);
     let mark: Option<(String, Option<String>)> = u
         .query_row(
             "SELECT status, note FROM marks WHERE vid = ?1",
@@ -1088,7 +1242,7 @@ async fn vn_detail(
     v["mark"] = json!(mark.as_ref().map(|m| &m.0));
     v["note"] = json!(mark.and_then(|m| m.1));
     if let Some(vn) = s.cat()?.get(vid) {
-        let defs = s.sources.read().unwrap();
+        let defs = s.sources.read().unwrap_or_else(PoisonError::into_inner);
         let order: Vec<String> = v["langs"]
             .as_array()
             .map(|a| {
@@ -1187,7 +1341,7 @@ async fn vn_prices(
 const STATUSES: &[&str] = &["wish", "playing", "finished", "dropped", "favorite"];
 
 async fn my_list(State(s): St) -> ApiResult<Value> {
-    let u = s.user.lock().unwrap();
+    let u = s.user.lock().unwrap_or_else(PoisonError::into_inner);
     let mut st = u
         .prepare("SELECT vid, status, note, updated FROM marks ORDER BY updated DESC")
         .map_err(anyhow::Error::from)?;
@@ -1297,6 +1451,12 @@ async fn image(State(s): St, Path(path): Path<String>) -> Response {
                 let _ = tokio::fs::create_dir_all(dir).await;
             }
             let _ = tokio::fs::write(&file, &b).await;
+            // check the cache size now and then (every 300 new images)
+            static WRITES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            if WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 300 == 299 {
+                let dir = s.data_dir.join("img");
+                tokio::task::spawn_blocking(move || prune_image_cache(&dir, IMAGE_CACHE_MAX));
+            }
             b.to_vec()
         }
     };
@@ -1347,10 +1507,11 @@ async fn static_file(State(s): St, uri: Uri) -> Response {
     match data {
         Some(bytes) => {
             let mime = mime_guess::from_path(&path).first_or_octet_stream();
-            let cache = if path == "index.html" || path == "sw.js" {
-                "no-cache"
+            // always revalidate: after an app update old cached modules must not mix with new ones
+            let cache = if path.starts_with("icons/") {
+                "public, max-age=86400"
             } else {
-                "public, max-age=3600"
+                "no-cache"
             };
             Response::builder()
                 .header(header::CONTENT_TYPE, mime.as_ref())
@@ -1365,6 +1526,30 @@ async fn static_file(State(s): St, uri: Uri) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn image_cache_is_trimmed_oldest_first() {
+        let dir = std::env::temp_dir().join(format!("vnshelf-prune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("cv/01")).unwrap();
+        for i in 0..10 {
+            std::fs::write(dir.join(format!("cv/01/{i}.jpg")), vec![0u8; 1000]).unwrap();
+            let t =
+                std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000 + i);
+            std::fs::File::options()
+                .write(true)
+                .open(dir.join(format!("cv/01/{i}.jpg")))
+                .unwrap()
+                .set_modified(t)
+                .unwrap();
+        }
+        prune_image_cache(&dir, 5000);
+        let left: Vec<_> = (0..10)
+            .filter(|i| dir.join(format!("cv/01/{i}.jpg")).exists())
+            .collect();
+        assert_eq!(left, vec![7, 8, 9]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn image_paths() {
         assert!(valid_image_path("cv.t/59/77859.jpg"));

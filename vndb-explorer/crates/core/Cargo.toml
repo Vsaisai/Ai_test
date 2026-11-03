@@ -16,6 +16,9 @@ zstd = "0.13"
 urlencoding = "2"
 unicode-normalization = "0.1"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # TLS: the system stack on desktop, rustls with bundled Mozilla roots on Android.
 [target.'cfg(not(target_os = "android"))'.dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["native-tls"] }

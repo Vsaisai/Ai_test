@@ -45,10 +45,16 @@ public class JobService extends Service {
         }
         running = true;
         Intent i = new Intent(ctx, JobService.class).putExtra(EXTRA_PORT, port);
-        if (Build.VERSION.SDK_INT >= 26) {
-            ctx.startForegroundService(i);
-        } else {
-            ctx.startService(i);
+        try {
+            if (Build.VERSION.SDK_INT >= 26) {
+                ctx.startForegroundService(i);
+            } else {
+                ctx.startService(i);
+            }
+        } catch (RuntimeException e) {
+            // e.g. Android 12+ refuses to start a foreground service from the background:
+            // the job still runs in the app, only without the notification; allow a new try later
+            running = false;
         }
     }
 
@@ -62,10 +68,16 @@ public class JobService extends Service {
         int port = intent != null ? intent.getIntExtra(EXTRA_PORT, -1) : -1;
         createChannels();
         Notification first = progressNotification("VN Shelf", "Подготовка…", "", -1);
-        if (Build.VERSION.SDK_INT >= 29) {
-            startForeground(ID_PROGRESS, first, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
-        } else {
-            startForeground(ID_PROGRESS, first);
+        try {
+            if (Build.VERSION.SDK_INT >= 29) {
+                startForeground(ID_PROGRESS, first, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
+            } else {
+                startForeground(ID_PROGRESS, first);
+            }
+        } catch (RuntimeException e) {
+            running = false;
+            stopSelf();
+            return START_NOT_STICKY;
         }
         acquireLocks();
         if (worker == null) {

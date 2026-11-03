@@ -67,6 +67,16 @@ public class MainActivity extends Activity {
                 openExternal(u);
                 return true;
             }
+
+            /** The WebView renderer crashed or was killed for memory: rebuild instead of crashing the app. */
+            @Override
+            public boolean onRenderProcessGone(WebView view, android.webkit.RenderProcessGoneDetail detail) {
+                if (view == web) {
+                    web = null;
+                    recreate();
+                }
+                return true;
+            }
         });
 
         final String dir = getFilesDir().getAbsolutePath();
@@ -81,10 +91,12 @@ public class MainActivity extends Activity {
                     return;
                 }
                 setContentView(web);
-                if (state != null && web.restoreState(state) != null) {
+                String home = "http://127.0.0.1:" + p + "/";
+                // restore the page only if it belongs to this server (the port may differ after a restart)
+                if (state != null && web.restoreState(state) != null && web.getUrl() != null && web.getUrl().startsWith(home)) {
                     return;
                 }
-                web.loadUrl("http://127.0.0.1:" + p + "/");
+                web.loadUrl(home);
             });
         }, "vnshelf-start").start();
     }
