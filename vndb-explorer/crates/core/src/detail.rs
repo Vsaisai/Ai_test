@@ -341,23 +341,29 @@ fn vndb_link(url: &str) -> Option<(char, u32)> {
 pub fn tag_description(raw: &str) -> TagDescription {
     let mut parts: Vec<DescPart> = Vec::new();
     let mut examples = Vec::new();
-    let push = |parts: &mut Vec<DescPart>, text: &str, link: Option<(char, u32)>, url: Option<String>| {
-        if text.is_empty() {
-            return;
-        }
-        let (tag, vn) = match link {
-            Some(('g', id)) => (Some(id), None),
-            Some(('v', id)) => (None, Some(id)),
-            _ => (None, None),
-        };
-        if tag.is_none() && vn.is_none() && url.is_none() {
-            if let Some(last) = parts.last_mut().filter(|p| p.is_text()) {
-                last.text.push_str(text);
+    let push =
+        |parts: &mut Vec<DescPart>, text: &str, link: Option<(char, u32)>, url: Option<String>| {
+            if text.is_empty() {
                 return;
             }
-        }
-        parts.push(DescPart { text: text.to_string(), tag, vn, url });
-    };
+            let (tag, vn) = match link {
+                Some(('g', id)) => (Some(id), None),
+                Some(('v', id)) => (None, Some(id)),
+                _ => (None, None),
+            };
+            if tag.is_none() && vn.is_none() && url.is_none() {
+                if let Some(last) = parts.last_mut().filter(|p| p.is_text()) {
+                    last.text.push_str(text);
+                    return;
+                }
+            }
+            parts.push(DescPart {
+                text: text.to_string(),
+                tag,
+                vn,
+                url,
+            });
+        };
     let mut rest = raw;
     loop {
         let Some(start) = rest.find("[url=") else {
@@ -378,13 +384,21 @@ pub fn tag_description(raw: &str) -> TagDescription {
         let text = clean_bbcode_keep(&after[close + 1..end]);
         rest = &after[end + 6..];
         if let Some(path) = screenshot_path(url) {
-            examples.push(TagExample { path, nsfw: text.to_lowercase().contains("nsfw") });
+            examples.push(TagExample {
+                path,
+                nsfw: text.to_lowercase().contains("nsfw"),
+            });
         } else if let Some(l @ ('g' | 'v', _)) = vndb_link(url) {
             push(&mut parts, &text, Some(l), None);
         } else if url.starts_with("http") {
             push(&mut parts, &text, None, Some(url.to_string()));
         } else if url.starts_with('/') && vndb_link(url).is_some() {
-            push(&mut parts, &text, None, Some(format!("https://vndb.org{url}")));
+            push(
+                &mut parts,
+                &text,
+                None,
+                Some(format!("https://vndb.org{url}")),
+            );
         } else {
             push(&mut parts, &text, None, None);
         }
@@ -410,7 +424,11 @@ pub fn tag_description(raw: &str) -> TagDescription {
     }
     parts.retain(|p| !p.text.is_empty());
     let text: String = parts.iter().map(|p| p.text.as_str()).collect();
-    TagDescription { text: text.trim().to_string(), parts, examples }
+    TagDescription {
+        text: text.trim().to_string(),
+        parts,
+        examples,
+    }
 }
 
 /// Like [`clean_bbcode`] but keeps the surrounding whitespace (used for fragments).
@@ -845,16 +863,28 @@ mod tests {
     #[test]
     fn tag_description_examples_and_links() {
         let d = tag_description("Box at the bottom.\n\nIf not, use the [url=http://vndb.org/g398]Floating Textbox[/url] tag.\n\n[url=http://s.vndb.org/sf/01/6101.jpg]Example 1[/url]\n[url=https://s2.vndb.org/sf/04/1304.jpg]NSFW Example 2[/url]\nSee [url=https://en.wikipedia.org/wiki/X]Wikipedia[/url].");
-        assert_eq!(d.text, "Box at the bottom.\n\nIf not, use the Floating Textbox tag.\n\nSee Wikipedia.");
+        assert_eq!(
+            d.text,
+            "Box at the bottom.\n\nIf not, use the Floating Textbox tag.\n\nSee Wikipedia."
+        );
         assert_eq!(
             d.examples,
             vec![
-                TagExample { path: "sf/01/6101.jpg".into(), nsfw: false },
-                TagExample { path: "sf/04/1304.jpg".into(), nsfw: true },
+                TagExample {
+                    path: "sf/01/6101.jpg".into(),
+                    nsfw: false
+                },
+                TagExample {
+                    path: "sf/04/1304.jpg".into(),
+                    nsfw: true
+                },
             ]
         );
         assert_eq!(d.parts[1].tag, Some(398));
-        assert_eq!(d.parts[3].url.as_deref(), Some("https://en.wikipedia.org/wiki/X"));
+        assert_eq!(
+            d.parts[3].url.as_deref(),
+            Some("https://en.wikipedia.org/wiki/X")
+        );
         assert!(!d.text.contains("Example"));
         let v = tag_description("Sequel to [url=/v17]Ever17[/url], see [url=/p12]the studio[/url]. [spoiler]x[/spoiler]");
         assert_eq!(v.parts[1].vn, Some(17));

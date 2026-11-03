@@ -94,7 +94,7 @@ export async function checkUpdates({ force = false, interactive = false } = {}) 
   if (!interactive && s.updatePolicy === 'manual') return null;
   if (!force && Date.now() - (s.lastUpdateCheck || 0) < 6 * 3600 * 1000) return null;
   let r;
-  try { r = await api.updates(force); } catch (e) { if (interactive) toast(`Нет связи с VNDB: ${e.message}`); return null; }
+  try { r = await api.updates(force); } catch (e) { if (interactive) toast(e.message); return null; }
   if (!r.ready) return r;
   save({ lastUpdateCheck: Date.now() });
   const c = r.check;

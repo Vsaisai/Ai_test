@@ -1925,6 +1925,7 @@ name = "vndb-core"
 version = "0.3.2"
 dependencies = [
  "anyhow",
+ "libc",
  "reqwest",
  "rusqlite",
  "serde",

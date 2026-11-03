@@ -1,6 +1,7 @@
 // Transport layer. Everything talks to the REST API through here, so a mobile shell
 // (Capacitor / Tauri) only needs to change `apiBase` or replace `call`.
 import { settings, langList } from './store.js';
+import { humanError } from './errors.js';
 
 const base = () => (settings().apiBase || '').replace(/\/$/, '');
 
@@ -10,15 +11,23 @@ async function call(method, path, body) {
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(body);
   }
-  const r = await fetch(base() + path, opts);
+  let r;
+  try {
+    r = await fetch(base() + path, opts);
+  } catch (e) {
+    throw new Error(settings().apiBase
+      ? 'Нет связи с сервером. Проверьте, что он запущен и адрес в настройках верный.'
+      : 'Нет связи с приложением. Перезапустите его, если ошибка повторяется.');
+  }
   const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+  if (!r.ok) throw new Error(humanError(data.error || `HTTP ${r.status}`));
   return data;
 }
 
 export const img = path => path ? `${base()}/img/${path}` : '';
 
 let tagsPromise = null;
+let translateDownUntil = 0;
 
 export const api = {
   async status() {
@@ -36,7 +45,16 @@ export const api = {
   updates: (force = false) => call('GET', `/api/updates${force ? '?force=true' : ''}`),
   appUpdate: () => call('GET', '/api/app-update'),
   setUpdateToken: token => call('PUT', '/api/app-update/token', { token }),
-  translate: (texts, to = 'ru') => call('POST', '/api/translate', { texts, to }),
+  async translate(texts, to = 'ru') {
+    // after a refusal (rate limit) give the free translators a break instead of asking on every page
+    if (Date.now() < translateDownUntil) throw new Error('Переводчик временно недоступен — показан оригинал.');
+    try {
+      return await call('POST', '/api/translate', { texts, to });
+    } catch (e) {
+      translateDownUntil = Date.now() + 120_000;
+      throw e;
+    }
+  },
   sync: () => call('POST', '/api/sync', {}),
   sources: () => call('GET', '/api/sources'),
   refreshSources: () => call('POST', '/api/sources/refresh', {}),
