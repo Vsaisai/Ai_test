@@ -575,7 +575,7 @@ fn github(s: &AppState, url: &str, accept: &str, auth: bool) -> reqwest::Request
 
 /// Latest `mobile-v*` release of one repository: Ok(Some(release)), Ok(None) = no release,
 /// Err(http code) = no access.
-async fn latest_release(s: &AppState, public: bool) -> Result<Option<Value>, u16> {
+async fn latest_release(s: &AppState, public: bool) -> Result<Option<Value>, (u16, String)> {
     let url = format!(
         "https://api.github.com/repos/{}/releases?per_page=20",
         repo_of(public)
@@ -583,11 +583,15 @@ async fn latest_release(s: &AppState, public: bool) -> Result<Option<Value>, u16
     let resp = github(s, &url, "application/vnd.github+json", !public)
         .send()
         .await
-        .map_err(|_| 0u16)?;
+        .map_err(|e| (0u16, format!("api.github.com: {}", short_err(&e))))?;
     if !resp.status().is_success() {
-        return Err(resp.status().as_u16());
+        let code = resp.status().as_u16();
+        return Err((code, format!("api.github.com: HTTP {code}")));
     }
-    let list: Vec<Value> = resp.json().await.map_err(|_| 0u16)?;
+    let list: Vec<Value> = resp
+        .json()
+        .await
+        .map_err(|e| (0u16, format!("api.github.com: {}", short_err(&e))))?;
     Ok(list.into_iter().find(|r| {
         !r["draft"].as_bool().unwrap_or(false)
             && !r["prerelease"].as_bool().unwrap_or(false)
@@ -595,6 +599,63 @@ async fn latest_release(s: &AppState, public: bool) -> Result<Option<Value>, u16
                 .as_str()
                 .is_some_and(|t| t.starts_with("mobile-v"))
     }))
+}
+
+/// The root cause of a reqwest error, short enough for the UI.
+fn short_err(e: &reqwest::Error) -> String {
+    let mut msg = e.to_string();
+    let mut src = std::error::Error::source(e);
+    while let Some(x) = src {
+        msg = x.to_string();
+        src = x.source();
+    }
+    msg.chars().take(160).collect()
+}
+
+/// Fallback without the API (rate limit, blocked host): `github.com/<repo>/releases/latest`
+/// redirects to the tag page; the APK has a predictable download URL.
+async fn latest_via_web() -> Result<Option<Value>, (u16, String)> {
+    let client = reqwest::Client::builder()
+        .user_agent(vndb_core::http::USER_AGENT)
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|e| (0, e.to_string()))?;
+    let url = format!("https://github.com/{PUBLIC_RELEASES_REPO}/releases/latest");
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| (0u16, format!("github.com: {}", short_err(&e))))?;
+    let loc = resp
+        .headers()
+        .get(header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let Some(tag) = loc
+        .rsplit("/tag/")
+        .next()
+        .filter(|t| t.starts_with("mobile-v"))
+    else {
+        return if resp.status().is_redirection() || resp.status().is_success() {
+            Ok(None)
+        } else {
+            Err((
+                resp.status().as_u16(),
+                format!("github.com: HTTP {}", resp.status().as_u16()),
+            ))
+        };
+    };
+    let ver = tag.trim_start_matches("mobile-v");
+    Ok(Some(json!({
+        "tag_name": tag,
+        "html_url": loc,
+        "assets": [{
+            "name": format!("VNShelf-{ver}.apk"),
+            "browser_download_url": format!("https://github.com/{PUBLIC_RELEASES_REPO}/releases/download/{tag}/VNShelf-{ver}.apk"),
+        }],
+    })))
 }
 
 fn version_of(r: &Value) -> Vec<u64> {
@@ -611,7 +672,18 @@ fn version_of(r: &Value) -> Vec<u64> {
 /// The public releases repository needs no token; the private one is tried only with a token.
 async fn app_update(State(s): St) -> ApiResult<Value> {
     let has_token = update_token(&s).is_some();
-    let public = latest_release(&s, true).await;
+    let mut public = latest_release(&s, true).await;
+    if public.is_err() {
+        // API blocked or rate limited: ask the website instead
+        match latest_via_web().await {
+            Ok(r) => public = Ok(r),
+            Err((_, e)) => {
+                if let Err((c, m)) = &public {
+                    public = Err((*c, format!("{m}; {e}")));
+                }
+            }
+        }
+    }
     let private = if has_token {
         Some(latest_release(&s, false).await)
     } else {
@@ -643,17 +715,18 @@ async fn app_update(State(s): St) -> ApiResult<Value> {
                 json!({ "status": "ok", "has_token": has_token, "version": null }),
             ));
         }
-        if let Some(Err(code)) = private {
+        if let Some(Err((code, _))) = &private {
+            let code = *code;
             if code != 0 {
                 return Ok(Json(
                     json!({ "status": "bad_token", "http": code, "has_token": true }),
                 ));
             }
         }
-        if matches!(public, Err(0)) && !matches!(private, Some(Ok(_))) {
+        if let Err((_, msg)) = &public {
             return Err(ApiError(
                 StatusCode::BAD_GATEWAY,
-                "нет связи с GitHub".into(),
+                format!("нет связи с GitHub ({msg})"),
             ));
         }
         return Ok(Json(json!({ "status": "private", "has_token": has_token })));
