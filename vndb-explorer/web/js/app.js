@@ -130,12 +130,30 @@ function newer(a, b) {
   return false;
 }
 
+const PUBLIC_RELEASES = 'https://api.github.com/repos/Vsaisai/vnshelf-releases/releases?per_page=20';
+
+/** Latest release read by the WebView itself (fallback when the local server is offline). */
+export async function directRelease() {
+  const r = await fetch(PUBLIC_RELEASES, { headers: { Accept: 'application/vnd.github+json' } });
+  if (!r.ok) throw new Error(`GitHub: HTTP ${r.status}`);
+  const rel = (await r.json()).find(x => !x.draft && !x.prerelease && /^mobile-v/.test(x.tag_name));
+  if (!rel) return { status: 'ok', version: null };
+  const apk = (rel.assets || []).find(a => a.name.endsWith('.apk'));
+  return { status: 'ok', repo: 'public', version: rel.tag_name.replace(/^mobile-v/, ''), html_url: rel.html_url,
+    size: apk?.size, public_url: apk?.browser_download_url };
+}
+
 export async function checkAppUpdate({ interactive = false } = {}) {
   if (!IN_APP) return null;
   const s = settings();
   if (!interactive && Date.now() - (s.lastAppCheck || 0) < 24 * 3600 * 1000) return null;
   try {
-    const u = await api.appUpdate();
+    let u;
+    try { u = await api.appUpdate(); } catch (e) {
+      // the app's server could not reach GitHub: try from the page (another network stack)
+      u = await directRelease().catch(() => null);
+      if (!u) throw e;
+    }
     if (u.status === 'private' || u.status === 'bad_token') {
       if (interactive) {
         showBanner(u.status === 'private'
@@ -148,11 +166,12 @@ export async function checkAppUpdate({ interactive = false } = {}) {
     save({ lastAppCheck: Date.now() });
     if (!u.version) { if (interactive) toast('Релизов приложения пока нет'); return null; }
     const ver = u.version;
-    if (newer(ver, APP_VERSION) && u.asset_id) {
+    if (newer(ver, APP_VERSION) && (u.asset_id || u.public_url)) {
       const size = u.size ? ` (${(u.size / 1048576).toFixed(1).replace('.', ',')} МБ)` : '';
       const canSelf = !!(window.VNShelfNative && window.VNShelfNative.startUpdate);
       // the APK comes through the local server, which adds the token for a private repository
-      const local = `${location.origin}/api/app-update/apk?id=${u.asset_id}&repo=${u.repo || 'public'}`;
+      // through the local server (adds a token if needed) or, without an asset id, straight from GitHub
+      const local = u.asset_id ? `${location.origin}/api/app-update/apk?id=${u.asset_id}&repo=${u.repo || 'public'}` : u.public_url;
       showBanner(`Вышла новая версия приложения ${ver} (у вас ${APP_VERSION}).`, [
         canSelf
           ? h('button', { class: 'btn primary', onclick: () => selfUpdate(local, ver) }, `Обновить${size}`)

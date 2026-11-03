@@ -592,7 +592,12 @@ function updateTokenField() {
       ? (u.repo === 'public' || !u.has_token ? 'Обновления доступны, токен не нужен.' : 'Доступ к релизам есть (токен работает).')
       : u.status === 'bad_token' ? 'Токен не подошёл: истёк или нет доступа к репозиторию.'
         : 'Релизы не найдены.';
-  }).catch(e => { note.textContent = `Нет связи с GitHub: ${e.message}`; });
+  }).catch(async e => {
+    // the page itself may still reach GitHub when the app's server cannot
+    const m = await import('./app.js');
+    const u = await m.directRelease().catch(() => null);
+    note.textContent = u ? 'Обновления доступны, токен не нужен.' : e.message.replace(/^./, c => c.toUpperCase());
+  });
   const saveTok = async val => {
     try { await api.setUpdateToken(val); input.value = ''; toast(val ? 'Токен сохранён' : 'Токен удалён'); refresh(); } catch (e) { toast(e.message); }
   };
