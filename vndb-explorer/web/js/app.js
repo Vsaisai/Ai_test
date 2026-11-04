@@ -68,9 +68,23 @@ document.getElementById('quicksearch').addEventListener('submit', e => {
 const banner = h('div', { class: 'update-banner', hidden: true });
 document.body.insertBefore(banner, document.getElementById('view'));
 
+/** A message box writer: (text, actions) -> shows them in `el` with a "Hide" link. */
+export function bannerOut(el, { closable = true } = {}) {
+  return (text, actions = []) => {
+    const kids = [typeof text === 'string' ? h('span', {}, text) : text, ...actions];
+    if (closable) kids.push(h('button', { class: 'linkish', onclick: () => { el.hidden = true; } }, 'Скрыть'));
+    el.replaceChildren(...kids.filter(Boolean));
+    el.hidden = false;
+  };
+}
+
+// Two separate boxes: database jobs (progress every second) must not overwrite an app update offer.
+const appBanner = h('div', { class: 'update-banner', hidden: true });
+document.body.insertBefore(appBanner, banner);
+const showAppBanner = bannerOut(appBanner);
+
 export function showBanner(text, actions = []) {
-  banner.replaceChildren(typeof text === 'string' ? h('span', {}, text) : text, ...actions, h('button', { class: 'linkish', onclick: () => { banner.hidden = true; } }, 'Скрыть'));
-  banner.hidden = false;
+  bannerOut(banner)(text, actions);
 }
 
 async function watchJob(doneText) {
@@ -143,7 +157,9 @@ export async function directRelease() {
     size: apk?.size, public_url: apk?.browser_download_url };
 }
 
-export async function checkAppUpdate({ interactive = false } = {}) {
+/** `show`: where to write the result (default: the app-update banner at the top). */
+export async function checkAppUpdate({ interactive = false, show = null } = {}) {
+  const out = show || showAppBanner;
   if (!IN_APP) return null;
   const s = settings();
   if (!interactive && Date.now() - (s.lastAppCheck || 0) < 24 * 3600 * 1000) return null;
@@ -156,7 +172,7 @@ export async function checkAppUpdate({ interactive = false } = {}) {
     }
     if (u.status === 'private' || u.status === 'bad_token') {
       if (interactive) {
-        showBanner(u.status === 'private'
+        out(u.status === 'private'
           ? 'Не удалось найти релизы приложения на GitHub. Откройте страницу релизов:'
           : 'GitHub не принял токен (истёк или нет доступа к репозиторию). Обновите его в «Настройки → Приложение».',
         [h('a', { class: 'btn primary', href: '#/settings' }, 'Открыть настройки'), h('a', { class: 'btn', href: RELEASES_PAGE }, 'Релизы на GitHub')]);
@@ -164,7 +180,7 @@ export async function checkAppUpdate({ interactive = false } = {}) {
       return null;
     }
     save({ lastAppCheck: Date.now() });
-    if (!u.version) { if (interactive) toast('Релизов приложения пока нет'); return null; }
+    if (!u.version) { if (interactive) out('Релизов приложения пока нет.'); return null; }
     const ver = u.version;
     if (newer(ver, APP_VERSION) && (u.asset_id || u.public_url)) {
       const size = u.size ? ` (${(u.size / 1048576).toFixed(1).replace('.', ',')} МБ)` : '';
@@ -172,46 +188,48 @@ export async function checkAppUpdate({ interactive = false } = {}) {
       // the APK comes through the local server, which adds the token for a private repository
       // through the local server (adds a token if needed) or, without an asset id, straight from GitHub
       const local = u.asset_id ? `${location.origin}/api/app-update/apk?id=${u.asset_id}&repo=${u.repo || 'public'}` : u.public_url;
-      showBanner(`Вышла новая версия приложения ${ver} (у вас ${APP_VERSION}).`, [
+      out(`⬆️ Доступна версия ${ver} (у вас ${APP_VERSION}).`, [
         canSelf
-          ? h('button', { class: 'btn primary', onclick: () => selfUpdate(local, ver) }, `Обновить${size}`)
+          ? h('button', { class: 'btn primary', onclick: () => selfUpdate(local, ver, out) }, `Обновить${size}`)
           : h('a', { class: 'btn primary', href: u.public_url || RELEASES_PAGE }, `Скачать APK${size}`),
         h('a', { class: 'btn', href: u.html_url || RELEASES_PAGE }, 'Что нового')]);
     } else if (interactive) {
-      toast(`Установлена последняя версия (${APP_VERSION})`);
+      if (show) out(`✅ У вас последняя версия ${APP_VERSION}.`); else toast(`Установлена последняя версия (${APP_VERSION})`);
     }
     return u;
   } catch (e) {
-    if (interactive) toast(e.message);
+    if (interactive) { if (show) out(`⚠️ ${e.message}`, [h('a', { class: 'btn', href: RELEASES_PAGE }, 'Скачать вручную')]); else toast(e.message); }
     return null;
   }
 }
 
 /** Download the new APK inside the app and hand it to the system installer (like Telegram). */
-function selfUpdate(url, ver) {
+function selfUpdate(url, ver, out = showAppBanner) {
   const res = window.VNShelfNative.startUpdate(url);
   if (res === 'need_permission') {
-    showBanner('Разрешите приложению устанавливать обновления (откроются настройки Android), затем нажмите «Обновить» ещё раз.',
-      [h('button', { class: 'btn primary', onclick: () => selfUpdate(url, ver) }, 'Обновить')]);
+    out('Разрешите приложению устанавливать обновления (откроются настройки Android), затем нажмите «Обновить» ещё раз.',
+      [h('button', { class: 'btn primary', onclick: () => selfUpdate(url, ver, out) }, 'Обновить')]);
     return;
   }
   const poll = () => {
     let st = {};
     try { st = JSON.parse(window.VNShelfNative.updateStatus() || '{}'); } catch { /* ignore */ }
     if (st.state === 'downloading') {
-      const pct = st.total ? Math.floor(st.done * 100 / st.total) : null;
-      const mb = b => (b / 1048576).toFixed(1).replace('.', ',');
-      showBanner(h('div', { class: 'job compact' },
-        h('div', { class: 'job-head' }, h('b', {}, pct !== null ? `${pct}%` : '…'), h('span', {}, ` Загружаю версию ${ver}${st.total ? ` · ${mb(st.done)} из ${mb(st.total)} МБ` : ''}`)),
+      // total is -1 when the size is unknown
+      const known = st.total > 0;
+      const pct = known ? Math.min(100, Math.max(0, Math.floor(st.done * 100 / st.total))) : null;
+      const mb = b => (Math.max(0, b) / 1048576).toFixed(1).replace('.', ',');
+      out(h('div', { class: 'job compact' },
+        h('div', { class: 'job-head' }, h('b', {}, pct !== null ? `${pct}%` : '…'), h('span', {}, ` Загружаю версию ${ver} · ${known ? `${mb(st.done)} из ${mb(st.total)} МБ` : `скачано ${mb(st.done)} МБ`}`)),
         h('div', { class: `bar ${pct === null ? 'indet' : ''}` }, h('i', { style: pct === null ? {} : { width: `${pct}%` } }))));
       setTimeout(poll, 400);
     } else if (st.state === 'installing') {
-      showBanner(`Подтвердите установку версии ${ver} в системном окне.`);
+      out(`Подтвердите установку версии ${ver} в системном окне.`);
       setTimeout(poll, 1000);
     } else if (st.state === 'error') {
-      showBanner(`⚠️ Не удалось обновить: ${st.error || 'ошибка'}`, [h('button', { class: 'btn', onclick: () => selfUpdate(url, ver) }, 'Повторить')]);
+      out(`⚠️ Не удалось обновить: ${st.error || 'ошибка'}`, [h('button', { class: 'btn', onclick: () => selfUpdate(url, ver, out) }, 'Повторить')]);
     } else if (st.state === 'done') {
-      showBanner('Обновление установлено — приложение перезапустится.');
+      out('Обновление установлено — приложение перезапустится.');
     } else {
       setTimeout(poll, 500);
     }

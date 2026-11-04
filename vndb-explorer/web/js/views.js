@@ -584,26 +584,40 @@ export async function viewTag(root, id) {
   }
 }
 
+let runAppCheck = () => {};
+/** Result of the app update check right here (version, "Update" button, download progress). */
+function appUpdateBox() {
+  const box = h('div', { class: 'update-banner inline-update' }, h('span', {}, 'Проверяю, есть ли новая версия…'));
+  runAppCheck = async () => {
+    const m = await import('./app.js');
+    const out = m.bannerOut(box, { closable: false });
+    out('Проверяю, есть ли новая версия…');
+    m.checkAppUpdate({ interactive: true, show: out });
+  };
+  setTimeout(runAppCheck, 0);
+  return box;
+}
+
 function updateTokenField() {
   const input = h('input', { type: 'password', placeholder: 'github_pat_…', autocomplete: 'off', spellcheck: 'false' });
-  const note = h('p', { class: 'muted small' }, 'Проверяю…');
+  const note = h('p', { class: 'muted small' }, '');
   const refresh = () => api.appUpdate().then(u => {
     note.textContent = u.status === 'ok'
-      ? (u.repo === 'public' || !u.has_token ? 'Обновления доступны, токен не нужен.' : 'Доступ к релизам есть (токен работает).')
+      ? (u.has_token && u.repo === 'private' ? 'Токен работает.' : 'Токен не нужен: релизы открыты.')
       : u.status === 'bad_token' ? 'Токен не подошёл: истёк или нет доступа к репозиторию.'
         : 'Релизы не найдены.';
   }).catch(async e => {
     // the page itself may still reach GitHub when the app's server cannot
     const m = await import('./app.js');
     const u = await m.directRelease().catch(() => null);
-    note.textContent = u ? 'Обновления доступны, токен не нужен.' : e.message.replace(/^./, c => c.toUpperCase());
+    note.textContent = u ? 'Токен не нужен: релизы открыты.' : e.message.replace(/^./, c => c.toUpperCase());
   });
   const saveTok = async val => {
     try { await api.setUpdateToken(val); input.value = ''; toast(val ? 'Токен сохранён' : 'Токен удалён'); refresh(); } catch (e) { toast(e.message); }
   };
   refresh();
-  return h('div', { class: 'field' },
-    h('label', {}, 'Токен GitHub (необязательно)'),
+  return h('details', { class: 'field token-field' },
+    h('summary', { class: 'muted small' }, 'Токен GitHub (не нужен, только для закрытых сборок)'),
     h('div', { class: 'row' }, input,
       h('button', { class: 'btn', type: 'button', onclick: () => saveTok(input.value.trim()) }, 'Сохранить'),
       h('button', { class: 'btn', type: 'button', onclick: () => saveTok('') }, 'Сбросить')),
@@ -1011,9 +1025,10 @@ export async function viewSettings(root) {
     IN_APP
       ? h('section', { class: 'panel form' }, h('h2', {}, 'Приложение'),
         h('p', {}, `VN Shelf для Android, версия ${APP_VERSION}. Новые версии публикуются в GitHub Releases.`),
+        appUpdateBox(),
         updateTokenField(),
         h('div', { class: 'toolbar' },
-          h('button', { class: 'btn primary', onclick: async () => { const m = await import('./app.js'); m.checkAppUpdate({ interactive: true }); } }, 'Проверить обновление приложения'),
+          h('button', { class: 'btn', onclick: () => runAppCheck() }, 'Проверить ещё раз'),
           reset))
       : h('section', { class: 'panel form' }, h('h2', {}, 'Сервер'),
         field('Адрес сервера', text('apiBase', 'пусто = этот же сервер'), 'Нужно для мобильного приложения: например http://192.168.1.10:8080'),

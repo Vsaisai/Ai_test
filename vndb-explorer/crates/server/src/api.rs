@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use tower_http::compression::predicate::Predicate as _;
 use vndb_core::search::{Card, SearchRequest, Sort};
 use vndb_core::shelves::{self, Shelves};
 use vndb_core::sources::Sources;
@@ -396,7 +397,23 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/img/*path", get(image))
         .fallback(static_file)
         .layer(axum::middleware::from_fn(same_origin_only))
-        .layer(tower_http::compression::CompressionLayer::new())
+        // APKs and images are already compressed; compressing them on the fly also hides the
+        // download size (no Content-Length), which broke the update progress
+        .layer(
+            tower_http::compression::CompressionLayer::new().compress_when(
+                tower_http::compression::predicate::DefaultPredicate::new()
+                    .and(
+                        tower_http::compression::predicate::NotForContentType::const_new(
+                            "application/vnd.android.package-archive",
+                        ),
+                    )
+                    .and(
+                        tower_http::compression::predicate::NotForContentType::const_new(
+                            "application/octet-stream",
+                        ),
+                    ),
+            ),
+        )
         .with_state(state)
 }
 
