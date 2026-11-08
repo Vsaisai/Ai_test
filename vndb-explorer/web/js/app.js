@@ -255,6 +255,11 @@ function selfUpdate(url, ver, out = showAppBanner) {
   poll();
 }
 
+// bottom menu in the app, on touch screens (phones, tablets) and narrow windows; top menu on desktops
+const touchNav = () => IN_APP || matchMedia('(pointer: coarse)').matches || innerWidth <= 760;
+document.documentElement.classList.toggle('touch-nav', touchNav());
+addEventListener('resize', () => document.documentElement.classList.toggle('touch-nav', touchNav()));
+
 applyTheme();
 buildNav();
 installTagTips();
