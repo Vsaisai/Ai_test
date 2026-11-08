@@ -95,8 +95,11 @@ fn build(path: &std::path::Path) {
         )
         .unwrap();
         for (l, k) in langs {
-            c.execute("INSERT INTO vn_langs VALUES (?1,?2,?3)", params![id, l, k])
-                .unwrap();
+            c.execute(
+                "INSERT INTO vn_langs(vid, lang, kind) VALUES (?1,?2,?3)",
+                params![id, l, k],
+            )
+            .unwrap();
         }
         for (t, r) in tags {
             c.execute(
@@ -109,9 +112,14 @@ fn build(path: &std::path::Path) {
 }
 
 fn catalog() -> (tempdir::Dir, Catalog) {
+    catalog_with(|_| {})
+}
+
+fn catalog_with(tweak: impl Fn(&Connection)) -> (tempdir::Dir, Catalog) {
     let dir = tempdir::Dir::new();
     let p = dir.0.join("c.sqlite");
     build(&p);
+    tweak(&Connection::open(&p).unwrap());
     let cat = Catalog::open(&p).unwrap();
     (dir, cat)
 }
@@ -323,4 +331,104 @@ fn profile_stats_and_achievements_follow_the_lists() {
     );
     // VN 3 has 50 votes: a hidden gem
     assert!(p.achievements.iter().find(|a| a.id == "gem").unwrap().done);
+}
+
+#[test]
+fn languages_split_into_ready_releases_and_patches() {
+    use vndb_core::search::LangSource;
+    // Beta's Russian is a fan patch, not a ready release
+    let (_d, cat) = catalog_with(|c| {
+        c.execute(
+            "UPDATE vn_langs SET ready = 0, patch = 1 WHERE vid = 3 AND lang = 'ru'",
+            [],
+        )
+        .unwrap();
+    });
+    let ids = |src| {
+        let req = SearchRequest {
+            lang_mode: LangMode::List,
+            langs: vec!["ru".into()],
+            lang_source: src,
+            ..Default::default()
+        };
+        let mut v: Vec<String> = search(&cat, &req)
+            .unwrap()
+            .items
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        v.sort();
+        v
+    };
+    assert_eq!(ids(LangSource::Any), vec!["v3"]);
+    assert!(ids(LangSource::Ready).is_empty());
+    assert_eq!(ids(LangSource::Patch), vec!["v3"]);
+    let beta = cat.get(3).unwrap();
+    assert_eq!(
+        (
+            beta.ready_langs.contains(&"ru".into()),
+            beta.patch_langs.contains(&"ru".into())
+        ),
+        (false, true)
+    );
+}
+
+#[test]
+fn unknown_way_counts_only_for_any_and_unsplit_catalogs_ignore_the_way() {
+    use vndb_core::search::LangSource;
+    // Zeta (v1) English: no release says how -> unknown (neither ready nor patch)
+    let (_d, mut cat) = catalog_with(|c| {
+        c.execute(
+            "UPDATE vn_langs SET ready = 0, patch = 0 WHERE vid = 1 AND lang = 'en'",
+            [],
+        )
+        .unwrap();
+    });
+    let en = |cat: &Catalog, src| {
+        let req = SearchRequest {
+            lang_mode: LangMode::List,
+            langs: vec!["en".into()],
+            lang_source: src,
+            ..Default::default()
+        };
+        search(cat, &req)
+            .unwrap()
+            .items
+            .iter()
+            .any(|c| c.id == "v1")
+    };
+    assert!(en(&cat, LangSource::Any));
+    assert!(!en(&cat, LangSource::Ready));
+    assert!(!en(&cat, LangSource::Patch));
+    // an old database that could not be migrated: the way is ignored, nothing disappears
+    cat.lang_split = false;
+    assert!(en(&cat, LangSource::Ready));
+}
+
+#[test]
+fn old_catalogs_get_the_language_columns_from_their_releases() {
+    let dir = tempdir::Dir::new();
+    let p = dir.0.join("old.sqlite");
+    build(&p);
+    {
+        let c = Connection::open(&p).unwrap();
+        // releases: a Russian patch for Beta (v3), a full English release for Zeta (v1)
+        c.execute_batch(
+            "INSERT INTO releases(id, olang, released, minage, has_ero, patch, freeware, uncensored, official, engine) VALUES
+               (1, 'ru', 20200101, 0, 0, 1, 1, 0, 0, ''), (2, 'en', 20200101, 0, 0, 0, 0, 0, 1, '');
+             INSERT INTO release_titles(rid, lang, mtl, title, latin) VALUES (1, 'ru', 0, 'Beta RU', NULL), (2, 'en', 0, 'Zeta EN', NULL);
+             INSERT INTO release_vn(rid, vid, rtype) VALUES (1, 3, 'complete'), (2, 1, 'complete');
+             -- a catalog imported by an older version: no ready/patch columns
+             CREATE TABLE l2 AS SELECT vid, lang, kind FROM vn_langs; DROP TABLE vn_langs; ALTER TABLE l2 RENAME TO vn_langs;",
+        )
+        .unwrap();
+    }
+    let cat = Catalog::open(&p).unwrap();
+    assert!(cat.lang_split);
+    let beta = cat.get(3).unwrap();
+    assert!(beta.patch_langs.contains(&"ru".into()) && !beta.ready_langs.contains(&"ru".into()));
+    let zeta = cat.get(1).unwrap();
+    assert!(zeta.ready_langs.contains(&"en".into()));
+    // Japanese of Zeta has no release in the test data: unknown, neither ready nor patch
+    assert!(!zeta.ready_langs.contains(&"ja".into()) && !zeta.patch_langs.contains(&"ja".into()));
 }

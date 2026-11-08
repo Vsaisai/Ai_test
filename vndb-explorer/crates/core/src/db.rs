@@ -18,7 +18,7 @@ pub fn create_schema(c: &Connection) -> Result<()> {
                         length_cat INTEGER, devstatus INTEGER, aliases TEXT, description TEXT, released INTEGER,
                         has_ero INTEGER, minage INTEGER, freeware INTEGER, platforms TEXT, developers TEXT);
         CREATE TABLE vn_titles(vid INTEGER, lang TEXT, official INTEGER, title TEXT, latin TEXT);
-        CREATE TABLE vn_langs(vid INTEGER, lang TEXT, kind INTEGER);
+        CREATE TABLE vn_langs(vid INTEGER, lang TEXT, kind INTEGER, ready INTEGER NOT NULL DEFAULT 0, patch INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE vn_tags(vid INTEGER, tag INTEGER, rating REAL, spoiler INTEGER, lie INTEGER);
         CREATE TABLE vn_links(vid INTEGER, site TEXT, url TEXT);
         CREATE TABLE vn_screenshots(vid INTEGER, scr TEXT, rid INTEGER, sexual INTEGER, violence INTEGER);
@@ -84,14 +84,15 @@ pub fn recompute_derived(c: &Connection, only: Option<&[u32]>) -> Result<()> {
     c.execute_batch(&format!(
         "
         DELETE FROM vn_langs {langs_scope};
-        INSERT INTO vn_langs(vid, lang, kind)
-          SELECT rv.vid, rt.lang, MIN(CASE WHEN rt.mtl THEN 2 WHEN r.official THEN 0 ELSE 1 END)
+        INSERT INTO vn_langs(vid, lang, kind, ready, patch)
+          SELECT rv.vid, rt.lang, MIN(CASE WHEN rt.mtl THEN 2 WHEN r.official THEN 0 ELSE 1 END),
+                 MAX(NOT r.patch), MAX(r.patch)
           FROM release_vn rv JOIN releases r ON r.id = rv.rid JOIN release_titles rt ON rt.rid = r.id
           WHERE rt.lang <> '' {w_rv}
           GROUP BY rv.vid, rt.lang;
         UPDATE vn_langs SET kind = 0 WHERE EXISTS (SELECT 1 FROM vn WHERE vn.id = vn_langs.vid AND vn.olang = vn_langs.lang);
-        INSERT INTO vn_langs(vid, lang, kind)
-          SELECT vn.id, vn.olang, 0 FROM vn {w_vn_and} vn.olang <> ''
+        INSERT INTO vn_langs(vid, lang, kind, ready, patch)
+          SELECT vn.id, vn.olang, 0, 0, 0 FROM vn {w_vn_and} vn.olang <> ''
             AND NOT EXISTS (SELECT 1 FROM vn_langs l WHERE l.vid = vn.id AND l.lang = vn.olang);
         UPDATE vn SET
           released = COALESCE((SELECT MIN(r.released) FROM release_vn rv JOIN releases r ON r.id = rv.rid
@@ -116,6 +117,38 @@ pub fn recompute_derived(c: &Connection, only: Option<&[u32]>) -> Result<()> {
 pub fn open_catalog(path: &Path) -> Result<Connection> {
     let c = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     Ok(c)
+}
+
+/// Catalogs imported before languages were split into ready releases and patches get the two
+/// columns once (a few seconds), instead of a new 190 MB download. Computed from the dump's own
+/// tables: a language is `ready` if some non-patch release is in it, `patch` if a patch release
+/// is; neither (no release in that language, e.g. the original language of an unreleased VN)
+/// means "unknown".
+pub fn migrate_catalog(path: &Path) -> Result<()> {
+    let c = open_catalog(path)?;
+    let has: bool = c
+        .prepare("SELECT 1 FROM pragma_table_info('vn_langs') WHERE name = 'ready'")?
+        .exists([])?;
+    drop(c);
+    if has {
+        return Ok(());
+    }
+    let c = open_catalog_rw(path)?;
+    c.execute_batch(
+        "BEGIN;
+         ALTER TABLE vn_langs ADD COLUMN ready INTEGER NOT NULL DEFAULT 0;
+         ALTER TABLE vn_langs ADD COLUMN patch INTEGER NOT NULL DEFAULT 0;
+         CREATE TEMP TABLE lv AS
+           SELECT rv.vid, rt.lang, MAX(NOT r.patch) AS ready, MAX(r.patch) AS patch
+           FROM release_vn rv JOIN releases r ON r.id = rv.rid JOIN release_titles rt ON rt.rid = r.id
+           WHERE rt.lang <> '' GROUP BY rv.vid, rt.lang;
+         CREATE INDEX temp.lv_i ON lv(vid, lang);
+         UPDATE vn_langs SET
+           ready = COALESCE((SELECT ready FROM lv WHERE lv.vid = vn_langs.vid AND lv.lang = vn_langs.lang), 0),
+           patch = COALESCE((SELECT patch FROM lv WHERE lv.vid = vn_langs.vid AND lv.lang = vn_langs.lang), 0);
+         COMMIT;",
+    )?;
+    Ok(())
 }
 
 pub fn open_catalog_rw(path: &Path) -> Result<Connection> {

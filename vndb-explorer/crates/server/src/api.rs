@@ -433,6 +433,7 @@ async fn status(State(s): St) -> Json<Value> {
         "vns": cat.as_ref().map(|c| c.vns.len()),
         "tags": cat.as_ref().map(|c| c.tree.tags.len()),
         "dump_timestamp": cat.as_ref().map(|c| c.dump_timestamp.clone()),
+        "lang_split": cat.as_ref().map(|c| c.lang_split),
         "imported_at": cat.as_ref().map(|c| c.imported_at.clone()),
         "import": imp,
         "version": env!("CARGO_PKG_VERSION"),
@@ -698,17 +699,21 @@ async fn sources_refresh(State(s): St) -> Json<Value> {
 /// Every language VNs are available in, with the number of VNs (for the language filter).
 async fn langs(State(s): St) -> ApiResult<Value> {
     let c = s.cat()?;
-    let mut counts: HashMap<String, u32> = HashMap::new();
+    // lang -> (any way, ready release, through a patch)
+    let mut counts: HashMap<String, (u32, u32, u32)> = HashMap::new();
     for v in &c.vns {
         for (l, _) in &v.langs {
-            *counts.entry(l.clone()).or_default() += 1;
+            let e = counts.entry(l.clone()).or_default();
+            e.0 += 1;
+            e.1 += v.ready_langs.contains(l) as u32;
+            e.2 += v.patch_langs.contains(l) as u32;
         }
     }
-    let mut list: Vec<(String, u32)> = counts.into_iter().collect();
-    list.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-    Ok(Json(
-        json!({ "langs": list.into_iter().map(|(lang, vns)| json!({ "lang": lang, "vns": vns })).collect::<Vec<_>>() }),
-    ))
+    let mut list: Vec<(String, (u32, u32, u32))> = counts.into_iter().collect();
+    list.sort_by(|a, b| b.1 .0.cmp(&a.1 .0).then(a.0.cmp(&b.0)));
+    Ok(Json(json!({ "langs": list.into_iter()
+        .map(|(lang, (vns, ready, patch))| json!({ "lang": lang, "vns": vns, "ready": ready, "patch": patch }))
+        .collect::<Vec<_>>() })))
 }
 
 // ---------- tags ----------

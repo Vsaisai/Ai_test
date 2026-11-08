@@ -22,6 +22,19 @@ pub enum LangMode {
     Any,
 }
 
+/// How a language must be available.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LangSource {
+    /// Any way (ready release or patch) — the default for shelves.
+    #[default]
+    Any,
+    /// A ready (non-patch) release: playable without patching.
+    Ready,
+    /// Through a patch over another release.
+    Patch,
+}
+
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum EroMode {
@@ -63,6 +76,8 @@ pub struct SearchRequest {
     /// Minimum tag strength (0-3).
     pub min_level: f32,
     pub lang_mode: LangMode,
+    /// Ready release, patch or any way (for `Readable` and `List`).
+    pub lang_source: LangSource,
     /// Preferred languages in order; also the filter in `List` mode.
     pub langs: Vec<String>,
     /// Count machine-translation-only languages as available.
@@ -102,6 +117,7 @@ impl Default for SearchRequest {
             spoiler: 0,
             min_level: 0.0,
             lang_mode: LangMode::Readable,
+            lang_source: LangSource::Any,
             langs: vec!["en".into()],
             allow_mtl: true,
             ero: EroMode::Show,
@@ -151,6 +167,9 @@ pub struct Card {
     pub freeware: bool,
     /// Age rating (0, 12, 16, 18 …) when known.
     pub minage: Option<u8>,
+    /// Languages with a ready release / available through a patch.
+    pub ready_langs: Vec<String>,
+    pub patch_langs: Vec<String>,
     pub devstatus: u8,
     pub matched: Vec<u32>,
     pub missing: Vec<u32>,
@@ -218,6 +237,8 @@ pub fn card(v: &Vn, order: &[String], matched: Vec<u32>, missing: Vec<u32>) -> C
         ero: v.has_ero,
         freeware: v.freeware,
         minage: (v.minage >= 0).then_some(v.minage as u8),
+        ready_langs: v.ready_langs.clone(),
+        patch_langs: v.patch_langs.clone(),
         devstatus: v.devstatus,
         all_wanted: missing.is_empty(),
         matched,
@@ -225,15 +246,29 @@ pub fn card(v: &Vn, order: &[String], matched: Vec<u32>, missing: Vec<u32>) -> C
     }
 }
 
-fn lang_ok(v: &Vn, req: &SearchRequest) -> bool {
+fn lang_ok(v: &Vn, req: &SearchRequest, split: bool) -> bool {
     let usable = |k: u8| req.allow_mtl || k < 2;
+    // without the split (an old database that could not be migrated) every language counts
+    let source = if split {
+        req.lang_source
+    } else {
+        LangSource::Any
+    };
+    let via = |l: &String| match source {
+        LangSource::Any => true,
+        LangSource::Ready => v.ready_langs.contains(l),
+        LangSource::Patch => v.patch_langs.contains(l),
+    };
     match req.lang_mode {
         LangMode::Any => true,
-        LangMode::Readable => v.langs.iter().any(|(l, k)| !is_cjk(l) && usable(*k)),
+        LangMode::Readable => v
+            .langs
+            .iter()
+            .any(|(l, k)| !is_cjk(l) && usable(*k) && via(l)),
         LangMode::List => v
             .langs
             .iter()
-            .any(|(l, k)| req.langs.contains(l) && usable(*k)),
+            .any(|(l, k)| req.langs.contains(l) && usable(*k) && via(l)),
     }
 }
 
@@ -297,7 +332,7 @@ pub fn search(cat: &Catalog, req: &SearchRequest) -> Result<SearchResponse> {
                 continue;
             }
         }
-        if !lang_ok(v, req) {
+        if !lang_ok(v, req, cat.lang_split) {
             continue;
         }
         let is_ero = v.has_ero

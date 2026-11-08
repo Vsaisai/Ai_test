@@ -74,9 +74,36 @@ jobs:
           ls -la dist
           if gh release view "$TAG" > /dev/null 2>&1; then
             echo "Release $TAG already exists: bump vndb-explorer/VERSION to publish a new one."
+          else
+            gh release create "$TAG" dist/*.zip \
+              --target "$GITHUB_SHA" \
+              --title "VN Shelf $VERSION для ПК" \
+              --notes-file vndb-explorer/desktop/RELEASE_NOTES.md
+          fi
+
+      # The PC app checks this public repository for new versions (the code repository is
+      # private). --latest=false keeps the Android build as the "latest" release there.
+      - name: Publish to the public releases repository
+        env:
+          GH_TOKEN: ${{ secrets.VNDB_SECRET }}
+          PUBLIC_REPO: Vsaisai/vnshelf-releases
+        run: |
+          VERSION="$(tr -d ' \r\n' < vndb-explorer/VERSION)"
+          TAG="pc-v$VERSION"
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::Secret VNDB_SECRET is not set: the public releases repository is not updated."
             exit 0
           fi
-          gh release create "$TAG" dist/*.zip \
-            --target "$GITHUB_SHA" \
-            --title "VN Shelf $VERSION для ПК" \
-            --notes-file vndb-explorer/desktop/RELEASE_NOTES.md
+          if gh release view "$TAG" --repo "$PUBLIC_REPO" > /dev/null 2>&1; then
+            echo "$PUBLIC_REPO already has $TAG"
+            exit 0
+          fi
+          if gh release create "$TAG" dist/*.zip \
+              --repo "$PUBLIC_REPO" \
+              --latest=false \
+              --title "VN Shelf $VERSION для ПК" \
+              --notes-file vndb-explorer/desktop/RELEASE_NOTES.md; then
+            echo "Published https://github.com/$PUBLIC_REPO/releases/tag/$TAG"
+          else
+            echo "::warning::Could not publish $TAG to $PUBLIC_REPO (VNDB_SECRET needs Contents: Read and write there)."
+          fi

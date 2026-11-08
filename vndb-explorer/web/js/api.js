@@ -27,6 +27,7 @@ async function call(method, path, body) {
 export const img = path => path ? `${base()}/img/${path}` : '';
 
 let tagsPromise = null;
+let infoPromise = null;
 let translateDownUntil = 0;
 
 export const api = {
@@ -65,7 +66,12 @@ export const api = {
     }
     return tagsPromise;
   },
-  resetTags() { tagsPromise = null; },
+  resetTags() { tagsPromise = null; infoPromise = null; },
+  /** /api/status once per session (database facts such as lang_split), without the job side effects. */
+  info() {
+    if (!infoPromise) infoPromise = call('GET', '/api/status').catch(e => { infoPromise = null; throw e; });
+    return infoPromise;
+  },
   tag: id => call('GET', `/api/tags/${id}`),
   search: req => call('POST', '/api/search', req),
   langs: () => call('GET', '/api/langs'),

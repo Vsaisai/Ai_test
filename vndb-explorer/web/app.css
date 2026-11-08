@@ -541,3 +541,22 @@ body.sheet-open { overflow: hidden; }
 .lang-pick .choice small { margin-left: 2px; }
 .lang-pick .choice button.more { border-style: dashed; color: var(--muted); }
 .choice button.on small { color: inherit; opacity: .8; }
+
+/* ---- desktop: filters as a column next to the results, two-column VN page ---- */
+.search-layout { display: grid; grid-template-columns: 340px 1fr; gap: 20px; align-items: start; }
+.search-side { position: sticky; top: 76px; max-height: calc(100vh - 92px); }
+.sheet.inline { width: auto; max-height: calc(100vh - 92px); border-radius: var(--radius); box-shadow: none; }
+.sheet.inline .sheet-foot { border-radius: 0 0 var(--radius) var(--radius); }
+body.filter-column .filter-btn { display: none; }
+html:not(.touch-nav) { --card-w: 170px; }
+@media (min-width: 1200px) {
+  html:not(.touch-nav) .vn-page { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(320px, 1fr);
+    grid-template-rows: auto auto auto 1fr; column-gap: 24px; align-items: start; }
+  html:not(.touch-nav) .vn-page > * { grid-column: 1; }
+  html:not(.touch-nav) .vn-hero { grid-row: 1; }
+  html:not(.touch-nav) .vn-actions { grid-row: 2; }
+  html:not(.touch-nav) .hl-summary { grid-row: 3; }
+  html:not(.touch-nav) .vn-main { grid-row: 4; }
+  html:not(.touch-nav) .vn-page > .vn-side { grid-column: 2; grid-row: 1 / 5; }
+  html:not(.touch-nav) .vn-side > .panel:first-child { margin-top: 0; }
+}

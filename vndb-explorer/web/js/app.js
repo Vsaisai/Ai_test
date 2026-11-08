@@ -42,6 +42,7 @@ async function route() {
   const root = document.getElementById('view');
   const my = ++token;
   closeFilters();
+  document.body.classList.remove('filter-column');
   // the top search field shows the title of the current search
   document.getElementById('topq').value = parts[0] === 'search' ? (params.get('q') || '') : '';
   document.querySelector('.filter-dot').hidden = !(parts[0] === 'search' && [...params.keys()].some(k => k !== 'q' && k !== 'sort'));
@@ -77,6 +78,10 @@ document.getElementById('topsearch').addEventListener('submit', e => {
   document.getElementById('topq').blur();
 });
 document.getElementById('filterbtn').addEventListener('click', () => openFilters());
+// "/" puts the cursor into the search field (desktop keyboards)
+document.addEventListener('keydown', e => {
+  if (e.key === '/' && !/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || '')) { e.preventDefault(); document.getElementById('topq').focus(); }
+});
 
 // ---------- updates ----------
 
@@ -223,6 +228,25 @@ export async function checkAppUpdate({ interactive = false, show = null } = {}) 
   return rel;
 }
 
+/** PC (browser on a desktop, not the Android app or a touch screen): a new `pc-v*` build is out?
+ *  At most once a day; any failure (offline, GitHub limit) is silent and changes nothing. */
+async function checkPcUpdate() {
+  if (IN_APP || document.documentElement.classList.contains('touch-nav')) return;
+  if (Date.now() - (settings().lastPcCheck || 0) < 24 * 3600 * 1000) return;
+  save({ lastPcCheck: Date.now() });
+  try {
+    const [info, r] = await Promise.all([api.info(), fetch(RELEASES_API, { headers: { Accept: 'application/vnd.github+json' } })]);
+    if (!r.ok || !info.version) return;
+    // only PC builds count: the Android releases (and GitHub's "latest") are ignored
+    const rel = (await r.json()).find(x => !x.draft && !x.prerelease && /^pc-v/.test(x.tag_name));
+    if (!rel) return;
+    const ver = rel.tag_name.replace(/^pc-v/, '');
+    if (!newer(ver, info.version)) return;
+    showAppBanner(`Вышла версия ${ver} для ПК (у вас ${info.version}). Распакуйте её в новую папку и перенесите туда server/data.`, [
+      h('a', { class: 'btn primary', href: rel.html_url, target: '_blank', rel: 'noopener' }, 'Скачать')]);
+  } catch { /* no banner */ }
+}
+
 /** Download the new APK inside the app and hand it to the system installer (like Telegram). */
 function selfUpdate(url, ver, out = showAppBanner) {
   const res = window.VNShelfNative.startUpdate(url);
@@ -269,6 +293,7 @@ setTimeout(() => checkUpdates(), 1500);
 // a job may already be running (e.g. the app was reopened during a download)
 api.status().then(st => { if (st.ready && st.import?.running) watchJob(); }).catch(() => {});
 setTimeout(() => checkAppUpdate(), 4000);
+setTimeout(() => checkPcUpdate(), 5000);
 
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   navigator.serviceWorker.register('sw.js').catch(() => {});
