@@ -109,14 +109,23 @@ export function card(it, opts = {}) {
       `${it.matched.length}/${opts.wantCount}`));
   }
   if (it.freeware) badges.append(h('span', { class: 'badge free' }, 'free'));
+  const age = it.minage !== null && it.minage !== undefined ? h('span', { class: 'badge age', title: 'Возрастной рейтинг' }, `${it.minage}+`) : null;
   if (it.mark && MARKS[it.mark]) badges.append(h('span', { class: 'badge mark', title: MARKS[it.mark].label }, MARKS[it.mark].icon));
   const href = `#/vn/${it.id}${opts.hl && opts.hl.length ? `?hl=${opts.hl.join(',')}` : ''}`;
   return h('a', { class: 'card', href, title: it.original && it.original !== it.title ? `${it.title}\n${it.original}` : it.title },
-    h('div', { class: 'cover-wrap' }, cover(it.image, it.img_sexual, it.title, 'cover', { full: it.image_full, thumbW: 256, fullW: 600 }), badges),
+    h('div', { class: 'cover-wrap' }, cover(it.image, it.img_sexual, it.title, 'cover', { full: it.image_full, thumbW: 256, fullW: 600 }), badges, age),
     h('div', { class: 'card-title' }, it.title),
     h('div', { class: 'card-meta' }, meta),
     langBadges(it.langs, 2),
   );
+}
+
+/** Russian name of a language code (Intl knows them all; the code as a fallback). */
+let langNames = null;
+export function langName(code) {
+  try { langNames ||= new Intl.DisplayNames(['ru'], { type: 'language' }); } catch { langNames = false; }
+  const n = langNames ? langNames.of(code) : null;
+  return n && n.toLowerCase() !== code.toLowerCase() ? n[0].toUpperCase() + n.slice(1) : (LANG_NAMES[code] || code.toUpperCase());
 }
 
 export function spinner(text = 'Загрузка…') {

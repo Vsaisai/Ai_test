@@ -3,7 +3,7 @@ import { api, img } from './api.js';
 import { settings, save, baseRequest, DEFAULTS, IN_APP, APP_VERSION, PLATFORM_GROUPS } from './store.js';
 import {
   h, card, cover, spinner, errorBox, toast, debounce, langBadges, fmtLength,
-  LANG_NAMES, PLATFORMS, MARKS, jobPanel, langLegend, tagDescription, richText, ruLabel,
+  LANG_NAMES, PLATFORMS, MARKS, jobPanel, langLegend, tagDescription, richText, ruLabel, langName,
 } from './ui.js';
 import { CURATED, ADULT, tagLabel, catRu, resolveGroup, hasRu } from './taxonomy.js';
 import { openLightbox } from './lightbox.js';
@@ -268,6 +268,9 @@ export function readSearch(params) {
     mm: params.get('mm') || '',
     dev: params.get('dev') || '',
     lang: params.get('lang') || '',
+    // languages of the game ('' = not only Japanese, the default) and the age limit
+    langs: (params.get('langs') || '').split('|').filter(Boolean),
+    age: params.get('age') || '',
   };
 }
 
@@ -275,7 +278,8 @@ export function readSearch(params) {
 export function searchRequest(st) {
   const dev = st.dev || 'any';
   // language filter of the search: '' = readable (not only Japanese), a code, or 'any'
-  const lang = st.lang === 'any' ? { lang_mode: 'any' } : st.lang ? { lang_mode: 'list', langs: [st.lang] } : {};
+  const chosen = st.langs.length ? st.langs : (st.lang && st.lang !== 'any' ? [st.lang] : []);
+  const lang = chosen.length ? { lang_mode: 'list', langs: chosen } : st.lang === 'any' ? { lang_mode: 'any' } : {};
   return {
     ...baseRequest(),
     ...lang,
@@ -288,6 +292,7 @@ export function searchRequest(st) {
     min_votes: st.votes ? Number(st.votes) : null, min_rating: st.rating ? Number(st.rating) : null,
     freeware: st.free ? true : null,
     min_match: st.mm !== '' ? Number(st.mm) : null,
+    max_age: st.age !== '' ? Number(st.age) : null,
   };
 }
 
@@ -300,6 +305,8 @@ export function writeSearch(st) {
   if (st.free) p.set('free', '1');
   if (st.dev) p.set('dev', st.dev);
   if (st.lang) p.set('lang', st.lang);
+  if (st.langs.length) p.set('langs', st.langs.join('|'));
+  if (st.age !== '') p.set('age', st.age);
   return `#/search?${p}`;
 }
 
@@ -347,6 +354,8 @@ export async function viewSearch(root, params) {
     st.q && filterChip(`«${st.q}»`, () => { st.q = ''; }),
     DEV_LABEL[st.dev] && filterChip(DEV_LABEL[st.dev], () => { st.dev = ''; }),
     LANG_LABEL[st.lang] && filterChip(LANG_LABEL[st.lang], () => { st.lang = ''; }),
+    st.langs.length && filterChip(st.langs.length > 3 ? `Языков: ${st.langs.length}` : st.langs.map(langName).join(', '), () => { st.langs = []; }),
+    st.age !== '' && filterChip(st.age === '0' ? 'Для всех (0+)' : `До ${st.age}+`, () => { st.age = ''; }),
     st.plat.length && filterChip(st.plat.map(x => PLATFORMS[x] || x).join(', '), () => { st.plat = []; }),
     (st.lmin || st.lmax) && filterChip(`Длина ${st.lmin || 0}–${st.lmax || '∞'} мин`, () => { st.lmin = ''; st.lmax = ''; }),
     (st.yfrom || st.yto) && filterChip(`Годы ${st.yfrom || '…'}–${st.yto || '…'}`, () => { st.yfrom = ''; st.yto = ''; }),
@@ -859,6 +868,7 @@ export async function viewVn(root, id, params = new URLSearchParams()) {
     d.rating && ['Рейтинг', `★ ${d.rating.toFixed(2)} (${d.votes.toLocaleString('ru')} голосов)`],
     d.length_minutes && ['Длина', `${fmtLength(d.length_minutes)} (${d.length_votes} оценок)`],
     d.developers.length && ['Разработчик', d.developers.join(', ')],
+    d.minage !== null && d.minage !== undefined && ['Возраст', d.minage === 0 ? '0+ (для всех)' : `${d.minage}+`],
     d.devstatus === 1 && ['Статус', 'в разработке'],
     d.devstatus === 2 && ['Статус', 'отменена'],
   ].filter(Boolean);

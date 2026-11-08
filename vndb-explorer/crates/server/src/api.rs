@@ -378,6 +378,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/translate", post(translate))
         .route("/api/sources/refresh", post(sources_refresh))
         .route("/api/tags", get(tags))
+        .route("/api/langs", get(langs))
         .route("/api/tags/:id", get(tag_detail))
         .route("/api/search", post(search))
         .route("/api/shelves", post(shelves_overview))
@@ -690,6 +691,24 @@ async fn translate(State(s): St, Json(req): Json<TranslateReq>) -> ApiResult<Val
 
 async fn sources_refresh(State(s): St) -> Json<Value> {
     Json(json!({ "started": start_sources_refresh(s) }))
+}
+
+// ---------- languages ----------
+
+/// Every language VNs are available in, with the number of VNs (for the language filter).
+async fn langs(State(s): St) -> ApiResult<Value> {
+    let c = s.cat()?;
+    let mut counts: HashMap<String, u32> = HashMap::new();
+    for v in &c.vns {
+        for (l, _) in &v.langs {
+            *counts.entry(l.clone()).or_default() += 1;
+        }
+    }
+    let mut list: Vec<(String, u32)> = counts.into_iter().collect();
+    list.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    Ok(Json(
+        json!({ "langs": list.into_iter().map(|(lang, vns)| json!({ "lang": lang, "vns": vns })).collect::<Vec<_>>() }),
+    ))
 }
 
 // ---------- tags ----------

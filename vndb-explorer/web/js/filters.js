@@ -1,7 +1,7 @@
 // Filter sheet (the funnel in the top bar): genres, tags, where to play, game language, more filters
 // and collections. It edits a copy of the current search and opens the results with "Show N".
 import { api } from './api.js';
-import { h, debounce, PLATFORMS } from './ui.js';
+import { h, debounce, PLATFORMS, langName } from './ui.js';
 import { settings } from './store.js';
 import { CURATED, tagLabel, resolveGroup } from './taxonomy.js';
 import { readSearch, writeSearch, searchRequest, tagPicker, sortSelect } from './views.js';
@@ -76,6 +76,30 @@ export async function openFilters() {
   const plat = h('div', { class: 'checks' }, ['win', 'lin', 'mac', 'and', 'ios', 'web', 'swi', 'ps5', 'ps4', 'psv', 'xbs', 'xb1', 'n3d'].map(p => h('label', { class: 'check' },
     h('input', { type: 'checkbox', checked: st.plat.includes(p), onchange: e => { st.plat = e.target.checked ? [...st.plat, p] : st.plat.filter(x => x !== p); count(); } }), PLATFORMS[p])));
 
+  // every language of the database with the number of VNs; nothing chosen = "not only Japanese"
+  if (st.lang && st.lang !== 'any' && !st.langs.length) st.langs = [st.lang];
+  st.lang = '';
+  const langBox = h('div', { class: 'lang-pick' }, h('p', { class: 'muted small' }, 'Загрузка…'));
+  api.langs().then(r => {
+    const all = r.langs;
+    let expanded = st.langs.some(l => !all.slice(0, 12).some(x => x.lang === l));
+    const hint = h('p', { class: 'muted small' });
+    const paintHint = () => { hint.textContent = st.langs.length ? `Выбрано языков: ${st.langs.length}` : 'Ничего не выбрано — показываются новеллы, которые есть не только на японском.'; };
+    const chips = h('div', { class: 'choice' });
+    const render = () => {
+      const list = expanded ? all : all.slice(0, 12);
+      chips.replaceChildren(...list.map(({ lang, vns }) => h('button', {
+        type: 'button', class: st.langs.includes(lang) ? 'on' : '',
+        onclick: e => { st.langs = st.langs.includes(lang) ? st.langs.filter(x => x !== lang) : [...st.langs, lang]; e.currentTarget.classList.toggle('on'); paintHint(); count(); },
+      }, langName(lang), h('small', { class: 'muted' }, ` ${vns.toLocaleString('ru')}`))),
+      all.length > 12 ? h('button', { type: 'button', class: 'more', onclick: () => { expanded = !expanded; render(); } }, expanded ? 'Свернуть' : `Ещё ${all.length - 12}…`) : null);
+    };
+    render(); paintHint();
+    langBox.replaceChildren(h('div', { class: 'toolbar' },
+      h('button', { class: 'btn', type: 'button', onclick: () => { st.langs = all.map(x => x.lang); expanded = true; render(); paintHint(); count(); } }, 'Выбрать все'),
+      h('button', { class: 'btn', type: 'button', onclick: () => { st.langs = []; render(); paintHint(); count(); } }, 'Снять все')), chips, hint);
+  }).catch(() => { langBox.replaceChildren(h('p', { class: 'muted small' }, 'Список языков недоступен.')); });
+
   const collections = h('div', { class: 'pills' });
   api.shelvesConfig().then(cfg => {
     const adult = !!settings().adultTags;
@@ -91,7 +115,8 @@ export async function openFilters() {
       section('Подборки', collections),
       section('Теги', picker, chosen, h('a', { href: '#/tags', onclick: e => { e.preventDefault(); closeFilters(`#/tags?${writeSearch(st).split('?')[1] || ''}`); } }, 'Весь каталог тегов →')),
       section('Где играть', choice('dev', [['any', 'Везде'], ['pc', '💻 ПК'], ['phone', '📱 Телефон'], ['console', '🎮 Консоли']], () => { st.plat = []; })),
-      section('Язык игры', choice('lang', [['', 'Есть не на японском'], ['ru', 'Русский'], ['en', 'Английский'], ['any', 'Любой']])),
+      section('Язык игры', langBox),
+      section('Возраст', choice('age', [['', 'Любой'], ['0', '0+ для всех'], ['12', 'до 12+'], ['16', 'до 16+']])),
       h('details', { class: 'sheet-sec' }, h('summary', {}, h('h3', {}, 'Ещё фильтры')),
         h('div', { class: 'filter-grid' },
           h('div', { class: 'field' }, h('span', {}, 'Длина, минут'), h('div', { class: 'pair' }, num('lmin', 'от'), num('lmax', 'до'))),

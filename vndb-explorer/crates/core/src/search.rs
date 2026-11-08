@@ -76,6 +76,8 @@ pub struct SearchRequest {
     pub min_votes: Option<u32>,
     pub min_rating: Option<f32>,
     pub freeware: Option<bool>,
+    /// Only VNs with a known age rating up to this (e.g. 12 = "12+ and younger").
+    pub max_age: Option<u8>,
     /// Hide cancelled projects.
     pub hide_cancelled: bool,
     /// Only VNs that are already released (no TBA / future dates).
@@ -111,6 +113,7 @@ impl Default for SearchRequest {
             min_votes: None,
             min_rating: None,
             freeware: None,
+            max_age: None,
             hide_cancelled: false,
             released_only: false,
             tag_counts: false,
@@ -146,6 +149,8 @@ pub struct Card {
     pub platforms: Vec<String>,
     pub ero: bool,
     pub freeware: bool,
+    /// Age rating (0, 12, 16, 18 …) when known.
+    pub minage: Option<u8>,
     pub devstatus: u8,
     pub matched: Vec<u32>,
     pub missing: Vec<u32>,
@@ -212,6 +217,7 @@ pub fn card(v: &Vn, order: &[String], matched: Vec<u32>, missing: Vec<u32>) -> C
         platforms: v.platforms.clone(),
         ero: v.has_ero,
         freeware: v.freeware,
+        minage: (v.minage >= 0).then_some(v.minage as u8),
         devstatus: v.devstatus,
         all_wanted: missing.is_empty(),
         matched,
@@ -346,6 +352,12 @@ pub fn search(cat: &Catalog, req: &SearchRequest) -> Result<SearchResponse> {
             .min_rating
             .map(|m| v.rating < m || v.votecount == 0)
             .unwrap_or(false)
+        {
+            continue;
+        }
+        if req
+            .max_age
+            .is_some_and(|m| v.minage < 0 || v.minage as u8 > m)
         {
             continue;
         }
