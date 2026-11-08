@@ -47,11 +47,18 @@ pub struct Vn {
     pub platforms: Vec<String>,
     pub developers: Vec<u32>,
     pub langs: Vec<(String, LangKind)>,
+    /// Languages with a ready (non-patch) release: playable without patching.
+    pub ready_langs: Vec<String>,
+    /// Languages available through a patch over another release.
+    pub patch_langs: Vec<String>,
     pub tags: Vec<VnTag>,
 }
 
 pub struct Catalog {
     pub path: PathBuf,
+    /// Languages are split into ready releases and patches (false if an old database could not
+    /// be migrated: then the "how" filter is ignored and every language counts).
+    pub lang_split: bool,
     pub tree: TagTree,
     pub vns: Vec<Vn>,
     pub by_id: HashMap<u32, usize>,
@@ -139,6 +146,15 @@ pub fn format_date(d: u32) -> Option<String> {
 
 impl Catalog {
     pub fn open(path: &Path) -> Result<Self> {
+        // add the ready/patch language columns to older databases; if that is not possible the
+        // catalog still opens (every language then counts as ready)
+        let lang_split = match crate::db::migrate_catalog(path) {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("language columns not added ({e:#}); patches are not told apart");
+                false
+            }
+        };
         let c = crate::db::open_catalog(path)
             .with_context(|| format!("cannot open catalog {}", path.display()))?;
         let mut tree = TagTree::load(&c)?;
@@ -184,6 +200,8 @@ impl Catalog {
                             .filter_map(|x| x.parse().ok())
                             .collect(),
                         langs: vec![],
+                        ready_langs: vec![],
+                        patch_langs: vec![],
                         tags: vec![],
                     },
                     aliases,
@@ -220,11 +238,22 @@ impl Catalog {
             }
         }
         {
-            let mut st = c.prepare("SELECT vid, lang, kind FROM vn_langs")?;
+            let mut st = c.prepare(if lang_split {
+                "SELECT vid, lang, kind, ready, patch FROM vn_langs"
+            } else {
+                "SELECT vid, lang, kind, 0, 0 FROM vn_langs"
+            })?;
             let mut rows = st.query([])?;
             while let Some(r) = rows.next()? {
                 if let Some(i) = idx(r.get(0)?) {
-                    vns[i].langs.push((r.get(1)?, r.get(2)?));
+                    let lang: String = r.get(1)?;
+                    if r.get::<_, bool>(3)? {
+                        vns[i].ready_langs.push(lang.clone());
+                    }
+                    if r.get::<_, bool>(4)? {
+                        vns[i].patch_langs.push(lang.clone());
+                    }
+                    vns[i].langs.push((lang, r.get(2)?));
                 }
             }
         }
@@ -293,6 +322,7 @@ impl Catalog {
             .map(|t| t.id);
         Ok(Self {
             path: path.to_path_buf(),
+            lang_split,
             tree,
             vns,
             by_id,

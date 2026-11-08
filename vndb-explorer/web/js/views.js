@@ -271,6 +271,8 @@ export function readSearch(params) {
     // languages of the game ('' = not only Japanese, the default) and the age limit
     langs: (params.get('langs') || '').split('|').filter(Boolean),
     age: params.get('age') || '',
+    // how the language must be available: '' = a ready release (no patching), 'patch', 'any'
+    lsrc: params.get('lsrc') || '',
   };
 }
 
@@ -283,6 +285,7 @@ export function searchRequest(st) {
   return {
     ...baseRequest(),
     ...lang,
+    lang_source: st.lsrc === 'patch' ? 'patch' : st.lsrc === 'any' ? 'any' : 'ready',
     text: st.q || null,
     must: st.must.map(String), want: st.want.map(String), exclude: st.exclude.map(String),
     sort: st.sort,
@@ -307,6 +310,7 @@ export function writeSearch(st) {
   if (st.lang) p.set('lang', st.lang);
   if (st.langs.length) p.set('langs', st.langs.join('|'));
   if (st.age !== '') p.set('age', st.age);
+  if (st.lsrc) p.set('lsrc', st.lsrc);
   return `#/search?${p}`;
 }
 
@@ -355,6 +359,7 @@ export async function viewSearch(root, params) {
     DEV_LABEL[st.dev] && filterChip(DEV_LABEL[st.dev], () => { st.dev = ''; }),
     LANG_LABEL[st.lang] && filterChip(LANG_LABEL[st.lang], () => { st.lang = ''; }),
     st.langs.length && filterChip(st.langs.length > 3 ? `Языков: ${st.langs.length}` : st.langs.map(langName).join(', '), () => { st.langs = []; }),
+    st.lsrc && filterChip(st.lsrc === 'patch' ? 'Язык через патч' : 'Язык любым способом', () => { st.lsrc = ''; }),
     st.age !== '' && filterChip(st.age === '0' ? 'Для всех (0+)' : `До ${st.age}+`, () => { st.age = ''; }),
     st.plat.length && filterChip(st.plat.map(x => PLATFORMS[x] || x).join(', '), () => { st.plat = []; }),
     (st.lmin || st.lmax) && filterChip(`Длина ${st.lmin || 0}–${st.lmax || '∞'} мин`, () => { st.lmin = ''; st.lmax = ''; }),
@@ -366,16 +371,29 @@ export async function viewSearch(root, params) {
   ].filter(Boolean);
   const anything = st.must.length || st.want.length || st.exclude.length || other.length;
   const openSheet = async () => { const m = await import('./filters.js'); m.openFilters(); };
+  // wide desktop screens: the filters stay open as a column next to the results
+  const column = !document.documentElement.classList.contains('touch-nav') && innerWidth >= 1100;
+  document.body.classList.toggle('filter-column', column);
+  const outer = root;
+  if (column) {
+    const side = h('aside', { class: 'search-side' });
+    const main = h('div', { class: 'search-main' });
+    outer.append(h('div', { class: 'search-layout' }, side, main));
+    root = main;
+    import('./filters.js').then(m => m.filterColumn({ ...st })).then(p => { if (p) side.append(p); });
+  }
   root.append(...[
     h('div', { class: 'page-head' }, h('h1', {}, 'Поиск')),
     anything ? h('div', { class: 'chosen' }, chips, other) : null,
     h('div', { class: 'toolbar' },
-      h('button', { class: 'btn primary', type: 'button', onclick: openSheet }, '⚙️ Фильтры'),
+      column ? null : h('button', { class: 'btn primary', type: 'button', onclick: openSheet }, '⚙️ Фильтры'),
       sortSelect(st.sort, v => { st.sort = v; go(); }),
       anything ? h('button', { class: 'btn', type: 'button', onclick: () => { location.hash = '#/search'; } }, 'Сбросить всё') : null),
   ].filter(Boolean));
-  if (!st.must.length && !st.want.length && !st.exclude.length && !st.q && !st.plat.length && !st.free && !st.lmax && !st.lmin && !st.dev && !st.lang) {
-    root.append(h('p', { class: 'muted center' }, 'Введите название в строке сверху или нажмите «Фильтры» — жанры, теги, где играть, язык.'));
+  if (!st.must.length && !st.want.length && !st.exclude.length && !st.q && !st.plat.length && !st.free && !st.lmax && !st.lmin && !st.dev && !st.lang && !st.langs.length && st.age === '' && !st.lsrc
+    && !st.yfrom && !st.yto && !st.votes && !st.rating && !st.mm) {
+    root.append(h('p', { class: 'muted center' }, column ? 'Введите название в строке сверху или выберите фильтры слева — жанры, теги, где играть, язык.'
+      : 'Введите название в строке сверху или нажмите «Фильтры» — жанры, теги, где играть, язык.'));
     return;
   }
   const req = searchRequest(st);
@@ -619,6 +637,24 @@ function appUpdateBox() {
   return box;
 }
 
+/** Languages of a VN split by how they are available: ready releases and patches. */
+function langSplit(d, split) {
+  const by = new Map(d.langs.map(l => [l.lang, l]));
+  const row = (label, list, hint) => list.length ? h('div', { class: 'lang-line' }, h('span', { class: 'muted', title: hint }, label),
+    langBadges(list.map(l => by.get(l) || { lang: l, kind: 1 }), 40)) : null;
+  // an old database that could not be split: one plain list
+  if (!split) return row('Языки: ', d.langs.map(l => l.lang));
+  const ready = d.ready_langs || [];
+  const patch = (d.patch_langs || []).filter(l => !ready.includes(l));
+  const unknown = d.langs.map(l => l.lang).filter(l => !ready.includes(l) && !(d.patch_langs || []).includes(l));
+  return h('div', {},
+    row('Готовые релизы: ', ready, 'Можно играть сразу, без патчей'),
+    row('Через патч: ', patch, 'Нужна игра на другом языке и патч поверх'),
+    row('Способ неизвестен: ', unknown, 'На VNDB нет релиза на этом языке, по которому можно понять, готовый он или патч'),
+    (d.patch_langs || []).some(l => ready.includes(l)) ? h('p', { class: 'muted small' },
+      'Есть и патчи на: ', d.patch_langs.filter(l => ready.includes(l)).map(langName).join(', '), '.') : null);
+}
+
 // ---------- VN page ----------
 
 const SOURCE_TITLES = {
@@ -683,6 +719,7 @@ export async function viewVn(root, id, params = new URLSearchParams()) {
   } catch (e) { mount(root, errorBox(e)); return; }
   const s = settings();
   document.title = `${d.title} — VN Shelf`;
+  const langSplitOn = (await api.info().catch(() => ({}))).lang_split !== false;
 
   // personal status
   const markBox = h('label', { class: 'mark-pick' });
@@ -877,8 +914,9 @@ export async function viewVn(root, id, params = new URLSearchParams()) {
   const coverBtn = h('button', { class: 'cover-btn', type: 'button', 'aria-label': 'Открыть обложку',
     onclick: () => { if (!coverEl.classList.contains('blurred') && d.image_full) openLightbox([{ src: img(d.image_full), alt: d.title }]); } }, coverEl);
 
-  mount(root,
-    // first screen: small cover + title + key facts, one status button, then "where to get"
+  // phones: one column in this order ("where to get" right under the header);
+  // wide desktops (CSS grid): header, actions and text on the left, "where to get" + facts on the right from the top
+  mount(root, h('div', { class: 'vn-page' },
     h('div', { class: 'vn-hero' },
       h('div', { class: 'vn-cover' }, coverBtn),
       h('div', { class: 'vn-info' },
@@ -888,18 +926,18 @@ export async function viewVn(root, id, params = new URLSearchParams()) {
     h('div', { class: 'vn-actions' }, markBox,
       h('a', { class: 'btn', href: d.vndb_url, target: '_blank', rel: 'noopener' }, 'VNDB ↗')),
     hlSummary,
-    where,
-    h('section', { class: 'panel vn-facts' },
-      d.platforms.length ? h('p', {}, h('span', { class: 'muted' }, 'Платформы: '), d.platforms.map(p => PLATFORMS[p] || p).join(', ')) : null,
-      h('div', { class: 'lang-line' }, h('span', { class: 'muted' }, 'Языки: '), langBadges(d.langs, 30)),
-      h('details', { class: 'legend-box' }, h('summary', { class: 'muted small' }, 'Что значат значки языков'), langLegend(d.langs)),
-      d.links.some(l => ['wikidata', 'wp'].indexOf(l.site) < 0) ? h('div', { class: 'toolbar' },
-        d.links.filter(l => ['wikidata', 'wp'].indexOf(l.site) < 0).slice(0, 4).map(l => h('a', { class: 'btn', href: l.url, target: '_blank', rel: 'noopener noreferrer' }, l.label, ' ↗'))) : null),
-    h('div', { class: 'tr-line' }, trBtn, trNote),
-    d.description ? h('section', {}, h('h2', {}, 'Описание'), desc) : null,
-    h('section', {}, h('div', { class: 'section-head' }, h('h2', {}, 'Теги'), tagControls), spoilerLegend, tagBox),
-    shots, rels, releasesBlock(d),
-  );
+    h('div', { class: 'vn-side' }, where,
+      h('section', { class: 'panel vn-facts' },
+        d.platforms.length ? h('p', {}, h('span', { class: 'muted' }, 'Платформы: '), d.platforms.map(p => PLATFORMS[p] || p).join(', ')) : null,
+        langSplit(d, langSplitOn),
+        h('details', { class: 'legend-box' }, h('summary', { class: 'muted small' }, 'Что значат значки языков'), langLegend(d.langs)),
+        d.links.some(l => ['wikidata', 'wp'].indexOf(l.site) < 0) ? h('div', { class: 'toolbar' },
+          d.links.filter(l => ['wikidata', 'wp'].indexOf(l.site) < 0).slice(0, 4).map(l => h('a', { class: 'btn', href: l.url, target: '_blank', rel: 'noopener noreferrer' }, l.label, ' ↗'))) : null)),
+    h('div', { class: 'vn-main' },
+      h('div', { class: 'tr-line' }, trBtn, trNote),
+      d.description ? h('section', {}, h('h2', {}, 'Описание'), desc) : null,
+      h('section', {}, h('div', { class: 'section-head' }, h('h2', {}, 'Теги'), tagControls), spoilerLegend, tagBox),
+      shots, rels, releasesBlock(d))));
 }
 
 function communityBlock(d) {

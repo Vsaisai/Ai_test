@@ -1,5 +1,5 @@
 // Service worker: the app shell works offline; images and the API always go to the server.
-const SHELL = 'vnshelf-shell-v21';
+const SHELL = 'vnshelf-shell-v23';
 const FILES = ['./', 'index.html', 'app.css', 'js/app.js', 'js/api.js', 'js/ui.js', 'js/store.js', 'js/views.js', 'js/taxonomy.js', 'js/lightbox.js', 'js/tagtip.js', 'js/errors.js', 'js/profile.js', 'js/filters.js',
   'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png'];
 
@@ -14,6 +14,8 @@ self.addEventListener('activate', e => {
 self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
   if (e.request.method !== 'GET') return;
+  // only this server's files: requests to other sites (GitHub, VNDB) go straight to the network
+  if (url.origin !== location.origin) return;
   // images: the server keeps its own size-limited cache and the browser caches them by HTTP headers
   if (url.pathname.includes('/img/')) return;
   if (url.pathname.includes('/api/')) return;
