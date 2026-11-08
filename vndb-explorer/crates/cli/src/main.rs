@@ -442,6 +442,7 @@ fn heading(k: SourceKind) -> &'static str {
         SourceKind::Store => "Stores",
         SourceKind::Direct => "From the developer",
         SourceKind::FanPatch => "Fan translations",
+        SourceKind::Original => "Original release",
         SourceKind::Search => "Search",
     }
 }
