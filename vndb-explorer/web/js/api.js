@@ -68,6 +68,7 @@ export const api = {
   resetTags() { tagsPromise = null; },
   tag: id => call('GET', `/api/tags/${id}`),
   search: req => call('POST', '/api/search', req),
+  shelvesConfig: () => call('GET', '/api/shelves-config'),
   shelves: (base, adult, perShelf = 16) => call('POST', '/api/shelves', { base, adult, per_shelf: perShelf }),
   shelf: (id, base, sort, offset, limit = 48) => call('POST', `/api/shelves/${encodeURIComponent(id)}`, { base, sort, offset, limit }),
   random: req => call('POST', '/api/random', req),

@@ -5,13 +5,13 @@ import { installTagTips } from './tagtip.js';
 import { api } from './api.js';
 import { humanError } from './errors.js';
 import { viewProfile } from './profile.js';
+import { openFilters, closeFilters } from './filters.js';
 import { viewHome, viewShelf, viewSearch, viewTags, viewTag, viewVn, viewMy, viewSettings } from './views.js';
 
 // One entry per place: the tag catalog is part of the search, the logo is not a second "home" button.
 const NAV = [
+  ['#/my', '❤️', 'Мои'],
   ['#/', '📚', 'Главная'],
-  ['#/search', '🔎', 'Поиск'],
-  ['#/my', '❤️', 'Мои полки'],
   ['#/profile', '👤', 'Профиль'],
 ];
 
@@ -25,9 +25,9 @@ function highlightNav(path) {
   const section = '#/' + (path.split('/')[1] || '');
   document.querySelectorAll('[data-href]').forEach(a => {
     const href = a.dataset.href;
-    const on = href === '#/' ? ['#/', '#/shelf', '#/vn'].includes(section)
-      : section.startsWith(href) || (href === '#/search' && (section === '#/tags' || section === '#/tag'))
-        || (href === '#/profile' && section === '#/settings');
+    // search, tags and VN pages belong to "Главная"; settings to the profile
+    const on = href === '#/' ? ['#/', '#/shelf', '#/vn', '#/search', '#/tags', '#/tag'].includes(section)
+      : section.startsWith(href) || (href === '#/profile' && section === '#/settings');
     a.classList.toggle('on', on);
   });
 }
@@ -41,6 +41,10 @@ async function route() {
   const parts = path.split('/').filter(Boolean);
   const root = document.getElementById('view');
   const my = ++token;
+  closeFilters();
+  // the top search field shows the title of the current search
+  document.getElementById('topq').value = parts[0] === 'search' ? (params.get('q') || '') : '';
+  document.querySelector('.filter-dot').hidden = !(parts[0] === 'search' && [...params.keys()].some(k => k !== 'q' && k !== 'sort'));
   const view = h('div', { class: 'view' });
   root.replaceChildren(view);
   document.title = 'VN Shelf';
@@ -61,6 +65,18 @@ async function route() {
     default: view.append(h('p', {}, 'Страница не найдена. ', h('a', { href: '#/' }, 'На главную')));
   }
 }
+
+document.getElementById('topsearch').addEventListener('submit', e => {
+  e.preventDefault();
+  const q = document.getElementById('topq').value.trim();
+  // on the results page only the title changes; the filters stay
+  const [path, query = ''] = location.hash.slice(1).split('?');
+  const params = path === '/search' ? new URLSearchParams(query) : new URLSearchParams();
+  if (q) params.set('q', q); else params.delete('q');
+  location.hash = `#/search?${params}`;
+  document.getElementById('topq').blur();
+});
+document.getElementById('filterbtn').addEventListener('click', () => openFilters());
 
 // ---------- updates ----------
 
