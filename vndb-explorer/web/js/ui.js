@@ -115,7 +115,7 @@ export function card(it, opts = {}) {
     h('div', { class: 'cover-wrap' }, cover(it.image, it.img_sexual, it.title, 'cover', { full: it.image_full, thumbW: 256, fullW: 600 }), badges),
     h('div', { class: 'card-title' }, it.title),
     h('div', { class: 'card-meta' }, meta),
-    langBadges(it.langs, 3),
+    langBadges(it.langs, 2),
   );
 }
 

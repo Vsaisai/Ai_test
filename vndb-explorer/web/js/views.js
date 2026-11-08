@@ -164,13 +164,18 @@ export async function viewHome(root) {
     const data = await api.shelves(baseRequest(), adultOn(), 16);
     mount(root,
       h('div', { class: 'home-head' },
-        h('p', { class: 'muted' }, `${st.vns.toLocaleString('ru')} визуальных новелл · база от ${(st.dump_timestamp || '').slice(0, 10)}`),
+        h('p', { class: 'muted small' }, `${st.vns.toLocaleString('ru')} новелл · база от ${(st.dump_timestamp || '').slice(0, 10)}`),
         h('div', { class: 'row-actions' },
           h('button', { class: 'btn', onclick: async () => {
             const r = await api.random({ ...baseRequest(), min_votes: 20 });
             if (r.id) location.hash = `#/vn/${r.id}`;
           } }, '🎲 Случайная'))),
-      data.sections.filter(sec => sec.shelves.length).map(sec => h('section', { class: 'shelf-section' },
+      // table of contents: the page is long, jump straight to a section
+      h('nav', { class: 'toc', 'aria-label': 'Разделы' }, data.sections.filter(sec => sec.shelves.length).map(sec =>
+        h('a', { href: `#sec-${sec.id}`, class: 'pill', onclick: e => {
+          e.preventDefault(); document.getElementById(`sec-${sec.id}`)?.scrollIntoView({ behavior: 'smooth' });
+        } }, sec.title))),
+      data.sections.filter(sec => sec.shelves.length).map(sec => h('section', { class: 'shelf-section', id: `sec-${sec.id}` },
         h('h2', {}, sec.title),
         ...sec.shelves.map(sh => h('div', { class: 'shelf' },
           h('div', { class: 'shelf-head' },
@@ -664,17 +669,22 @@ export async function viewVn(root, id, params = new URLSearchParams()) {
   document.title = `${d.title} — VN Shelf`;
 
   // personal status
-  const markBox = h('div', { class: 'marks' });
-  const renderMarks = () => markBox.replaceChildren(...Object.entries(MARKS).map(([k, m]) => h('button', {
-    class: `btn mark ${d.mark === k ? 'on' : ''}`, type: 'button',
-    onclick: async () => {
+  const markBox = h('label', { class: 'mark-pick' });
+  const renderMarks = () => {
+    const cur = d.mark && MARKS[d.mark] ? d.mark : '';
+    const sel = h('select', { 'aria-label': 'Моя полка', onchange: async e => {
+      const k = e.target.value;
       try {
-        if (d.mark === k) { await api.unmark(d.id); d.mark = null; toast('Убрано с полки'); }
-        else { await api.mark(d.id, k, d.note); d.mark = k; toast(`На полке «${m.label}»`); }
-        renderMarks();
-      } catch (e) { toast(e.message); }
-    },
-  }, m.icon, ' ', m.label)));
+        if (!k) { await api.unmark(d.id); d.mark = null; toast('Убрано из моих полок'); }
+        else { await api.mark(d.id, k, d.note); d.mark = k; toast(`На полке «${MARKS[k].label}»`); }
+      } catch (err) { toast(err.message); }
+      renderMarks();
+    } },
+    h('option', { value: '', selected: !cur }, cur ? '✕ Убрать из полок' : '＋ В мои полки'),
+    Object.entries(MARKS).map(([k, m]) => h('option', { value: k, selected: cur === k }, `${m.icon} ${m.label}`)));
+    markBox.className = `mark-pick ${cur ? 'on' : ''}`;
+    markBox.replaceChildren(h('span', { class: 'mark-face' }, cur ? `${MARKS[cur].icon} ${MARKS[cur].label}` : '＋ В мои полки'), h('span', { class: 'mark-caret' }, '▾'), sel);
+  };
   renderMarks();
 
   // where to get it
@@ -841,7 +851,6 @@ export async function viewVn(root, id, params = new URLSearchParams()) {
     d.rating && ['Рейтинг', `★ ${d.rating.toFixed(2)} (${d.votes.toLocaleString('ru')} голосов)`],
     d.length_minutes && ['Длина', `${fmtLength(d.length_minutes)} (${d.length_votes} оценок)`],
     d.developers.length && ['Разработчик', d.developers.join(', ')],
-    d.platforms.length && ['Платформы', d.platforms.map(p => PLATFORMS[p] || p).join(', ')],
     d.devstatus === 1 && ['Статус', 'в разработке'],
     d.devstatus === 2 && ['Статус', 'отменена'],
   ].filter(Boolean);
@@ -851,19 +860,23 @@ export async function viewVn(root, id, params = new URLSearchParams()) {
     onclick: () => { if (!coverEl.classList.contains('blurred') && d.image_full) openLightbox([{ src: img(d.image_full), alt: d.title }]); } }, coverEl);
 
   mount(root,
+    // first screen: small cover + title + key facts, one status button, then "where to get"
     h('div', { class: 'vn-hero' },
       h('div', { class: 'vn-cover' }, coverBtn),
       h('div', { class: 'vn-info' },
         h('h1', {}, d.title),
-        d.original && d.original !== d.title ? h('p', { class: 'muted' }, d.original) : null,
-        h('dl', { class: 'meta' }, meta.flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, v)])),
-        hlSummary,
-        h('div', { class: 'lang-line' }, h('span', { class: 'muted small' }, 'Языки: '), langBadges(d.langs, 30)),
-        langLegend(d.langs),
-        markBox,
-        h('div', { class: 'toolbar' }, h('a', { class: 'btn', href: d.vndb_url, target: '_blank', rel: 'noopener' }, 'VNDB ↗'),
-          d.links.filter(l => ['wikidata', 'wp'].indexOf(l.site) < 0).slice(0, 4).map(l => h('a', { class: 'btn', href: l.url, target: '_blank', rel: 'noopener noreferrer' }, l.label, ' ↗'))))),
+        d.original && d.original !== d.title ? h('p', { class: 'muted vn-original' }, d.original) : null,
+        h('dl', { class: 'meta' }, meta.flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, v)])))),
+    h('div', { class: 'vn-actions' }, markBox,
+      h('a', { class: 'btn', href: d.vndb_url, target: '_blank', rel: 'noopener' }, 'VNDB ↗')),
+    hlSummary,
     where,
+    h('section', { class: 'panel vn-facts' },
+      d.platforms.length ? h('p', {}, h('span', { class: 'muted' }, 'Платформы: '), d.platforms.map(p => PLATFORMS[p] || p).join(', ')) : null,
+      h('div', { class: 'lang-line' }, h('span', { class: 'muted' }, 'Языки: '), langBadges(d.langs, 30)),
+      h('details', { class: 'legend-box' }, h('summary', { class: 'muted small' }, 'Что значат значки языков'), langLegend(d.langs)),
+      d.links.some(l => ['wikidata', 'wp'].indexOf(l.site) < 0) ? h('div', { class: 'toolbar' },
+        d.links.filter(l => ['wikidata', 'wp'].indexOf(l.site) < 0).slice(0, 4).map(l => h('a', { class: 'btn', href: l.url, target: '_blank', rel: 'noopener noreferrer' }, l.label, ' ↗'))) : null),
     h('div', { class: 'tr-line' }, trBtn, trNote),
     d.description ? h('section', {}, h('h2', {}, 'Описание'), desc) : null,
     h('section', {}, h('div', { class: 'section-head' }, h('h2', {}, 'Теги'), tagControls), spoilerLegend, tagBox),
@@ -909,7 +922,7 @@ export async function viewMy(root, status) {
     const ids = my.marks.filter(m => !current || m.status === current).map(m => Number(m.id.slice(1)));
     mount(root,
       h('div', { class: 'page-head' }, h('h1', {}, 'Мои полки')),
-      h('div', { class: 'tabs' },
+      h('div', { class: 'tabs wrap' },
         h('a', { href: '#/my', class: current ? '' : 'on' }, `Все (${my.marks.length})`),
         Object.entries(MARKS).map(([k, m]) => h('a', { href: `#/my/${k}`, class: current === k ? 'on' : '' }, `${m.icon} ${m.label} (${counts[k] || 0})`))),
       ids.length
