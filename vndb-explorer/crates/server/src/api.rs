@@ -11,7 +11,7 @@ use rusqlite::Connection;
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use tower_http::compression::predicate::Predicate as _;
@@ -376,9 +376,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/sync", post(sync))
         .route("/api/sources", get(sources_info))
         .route("/api/translate", post(translate))
-        .route("/api/app-update", get(app_update))
-        .route("/api/app-update/apk", get(app_update_apk))
-        .route("/api/app-update/token", put(set_update_token))
         .route("/api/sources/refresh", post(sources_refresh))
         .route("/api/tags", get(tags))
         .route("/api/tags/:id", get(tag_detail))
@@ -397,8 +394,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/img/*path", get(image))
         .fallback(static_file)
         .layer(axum::middleware::from_fn(same_origin_only))
-        // APKs and images are already compressed; compressing them on the fly also hides the
-        // download size (no Content-Length), which broke the update progress
+        // binaries are already compressed; compressing them again would also drop Content-Length
         .layer(
             tower_http::compression::CompressionLayer::new().compress_when(
                 tower_http::compression::predicate::DefaultPredicate::new()
@@ -695,284 +691,6 @@ async fn sources_refresh(State(s): St) -> Json<Value> {
     Json(json!({ "started": start_sources_refresh(s) }))
 }
 
-// ---------- app updates (GitHub releases) ----------
-
-/// Public repository with release builds only (no code): the app needs no token to update.
-const PUBLIC_RELEASES_REPO: &str = "Vsaisai/vnshelf-releases";
-/// The code repository (private): used only when a token is saved in the settings.
-const PRIVATE_RELEASES_REPO: &str = "Vsaisai/Ai_test";
-/// Optional token baked in by a personal build (env `VNSHELF_UPDATE_TOKEN`). Official CI builds
-/// do not set it, so a shared APK never carries a token.
-const BUILD_TOKEN: Option<&str> = option_env!("VNSHELF_UPDATE_TOKEN");
-
-fn update_token(s: &AppState) -> Option<String> {
-    std::fs::read_to_string(s.data_dir.join("github_token"))
-        .ok()
-        .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty())
-        .or_else(|| {
-            BUILD_TOKEN
-                .map(str::trim)
-                .filter(|t| !t.is_empty())
-                .map(String::from)
-        })
-}
-
-fn repo_of(public: bool) -> &'static str {
-    if public {
-        PUBLIC_RELEASES_REPO
-    } else {
-        PRIVATE_RELEASES_REPO
-    }
-}
-
-fn github(s: &AppState, url: &str, accept: &str, auth: bool) -> reqwest::RequestBuilder {
-    let mut rb = s
-        .http
-        .get(url)
-        .header("Accept", accept)
-        .header("X-GitHub-Api-Version", "2022-11-28");
-    if auth {
-        if let Some(t) = update_token(s) {
-            rb = rb.bearer_auth(t);
-        }
-    }
-    rb
-}
-
-/// Latest `mobile-v*` release of one repository: Ok(Some(release)), Ok(None) = no release,
-/// Err(http code) = no access.
-async fn latest_release(s: &AppState, public: bool) -> Result<Option<Value>, (u16, String)> {
-    let url = format!(
-        "https://api.github.com/repos/{}/releases?per_page=20",
-        repo_of(public)
-    );
-    let resp = github(s, &url, "application/vnd.github+json", !public)
-        .send()
-        .await
-        .map_err(|e| (0u16, format!("api.github.com: {}", short_err(&e))))?;
-    if !resp.status().is_success() {
-        let code = resp.status().as_u16();
-        return Err((code, format!("api.github.com: HTTP {code}")));
-    }
-    let list: Vec<Value> = resp
-        .json()
-        .await
-        .map_err(|e| (0u16, format!("api.github.com: {}", short_err(&e))))?;
-    Ok(list.into_iter().find(|r| {
-        !r["draft"].as_bool().unwrap_or(false)
-            && !r["prerelease"].as_bool().unwrap_or(false)
-            && r["tag_name"]
-                .as_str()
-                .is_some_and(|t| t.starts_with("mobile-v"))
-    }))
-}
-
-/// The root cause of a reqwest error, short enough for the UI.
-fn short_err(e: &reqwest::Error) -> String {
-    let mut msg = e.to_string();
-    let mut src = std::error::Error::source(e);
-    while let Some(x) = src {
-        msg = x.to_string();
-        src = x.source();
-    }
-    msg.chars().take(160).collect()
-}
-
-/// Fallback without the API (rate limit, blocked host): `github.com/<repo>/releases/latest`
-/// redirects to the tag page; the APK has a predictable download URL.
-async fn latest_via_web() -> Result<Option<Value>, (u16, String)> {
-    let client = reqwest::Client::builder()
-        .user_agent(vndb_core::http::USER_AGENT)
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(20))
-        .build()
-        .map_err(|e| (0, e.to_string()))?;
-    let url = format!("https://github.com/{PUBLIC_RELEASES_REPO}/releases/latest");
-    let resp = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| (0u16, format!("github.com: {}", short_err(&e))))?;
-    let loc = resp
-        .headers()
-        .get(header::LOCATION)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
-    let Some(tag) = loc
-        .rsplit("/tag/")
-        .next()
-        .filter(|t| t.starts_with("mobile-v"))
-    else {
-        return if resp.status().is_redirection() || resp.status().is_success() {
-            Ok(None)
-        } else {
-            Err((
-                resp.status().as_u16(),
-                format!("github.com: HTTP {}", resp.status().as_u16()),
-            ))
-        };
-    };
-    let ver = tag.trim_start_matches("mobile-v");
-    Ok(Some(json!({
-        "tag_name": tag,
-        "html_url": loc,
-        "assets": [{
-            "name": format!("VNShelf-{ver}.apk"),
-            "browser_download_url": format!("https://github.com/{PUBLIC_RELEASES_REPO}/releases/download/{tag}/VNShelf-{ver}.apk"),
-        }],
-    })))
-}
-
-fn version_of(r: &Value) -> Vec<u64> {
-    r["tag_name"]
-        .as_str()
-        .unwrap_or("")
-        .trim_start_matches("mobile-v")
-        .split('.')
-        .map(|x| x.parse().unwrap_or(0))
-        .collect()
-}
-
-/// Newest app release: {status: ok|private|bad_token, version, size, asset_id, repo, html_url}.
-/// The public releases repository needs no token; the private one is tried only with a token.
-async fn app_update(State(s): St) -> ApiResult<Value> {
-    let has_token = update_token(&s).is_some();
-    let mut public = latest_release(&s, true).await;
-    if public.is_err() {
-        // API blocked or rate limited: ask the website instead
-        match latest_via_web().await {
-            Ok(r) => public = Ok(r),
-            Err((_, e)) => {
-                if let Err((c, m)) = &public {
-                    public = Err((*c, format!("{m}; {e}")));
-                }
-            }
-        }
-    }
-    let private = if has_token {
-        Some(latest_release(&s, false).await)
-    } else {
-        None
-    };
-    let mut best: Option<(Value, bool)> = None;
-    for (r, is_pub) in [
-        (public.as_ref().ok().cloned().flatten(), true),
-        (
-            private
-                .as_ref()
-                .and_then(|p| p.as_ref().ok().cloned().flatten()),
-            false,
-        ),
-    ] {
-        if let Some(r) = r {
-            if best
-                .as_ref()
-                .is_none_or(|(b, _)| version_of(&r) > version_of(b))
-            {
-                best = Some((r, is_pub));
-            }
-        }
-    }
-    let Some((rel, is_pub)) = best else {
-        let public_ok = public.is_ok();
-        if public_ok {
-            return Ok(Json(
-                json!({ "status": "ok", "has_token": has_token, "version": null }),
-            ));
-        }
-        if let Some(Err((code, _))) = &private {
-            let code = *code;
-            if code != 0 {
-                return Ok(Json(
-                    json!({ "status": "bad_token", "http": code, "has_token": true }),
-                ));
-            }
-        }
-        if let Err((_, msg)) = &public {
-            return Err(ApiError(
-                StatusCode::BAD_GATEWAY,
-                format!("нет связи с GitHub ({msg})"),
-            ));
-        }
-        return Ok(Json(json!({ "status": "private", "has_token": has_token })));
-    };
-    let apk = rel["assets"].as_array().and_then(|a| {
-        a.iter()
-            .find(|x| x["name"].as_str().is_some_and(|n| n.ends_with(".apk")))
-    });
-    Ok(Json(json!({
-        "status": "ok",
-        "has_token": has_token,
-        "repo": if is_pub { "public" } else { "private" },
-        "version": rel["tag_name"].as_str().unwrap_or("").trim_start_matches("mobile-v"),
-        "html_url": rel["html_url"],
-        "notes": rel["body"],
-        "asset_id": apk.map(|a| a["id"].clone()),
-        "size": apk.map(|a| a["size"].clone()),
-        "public_url": apk.map(|a| a["browser_download_url"].clone()),
-    })))
-}
-
-#[derive(Deserialize)]
-struct ApkQ {
-    id: u64,
-    /// "public" (default) or "private"
-    repo: Option<String>,
-}
-
-/// Stream a release asset through the local server (the token never leaves it). GitHub answers
-/// with a redirect to a signed download URL; reqwest drops the Authorization header there.
-async fn app_update_apk(State(s): St, Query(q): Query<ApkQ>) -> Response {
-    let public = q.repo.as_deref() != Some("private");
-    let url = format!(
-        "https://api.github.com/repos/{}/releases/assets/{}",
-        repo_of(public),
-        q.id
-    );
-    let resp = match github(&s, &url, "application/octet-stream", !public)
-        .timeout(std::time::Duration::from_secs(3600))
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => return (StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
-    };
-    if !resp.status().is_success() {
-        let code = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-        return (code, format!("GitHub: HTTP {}", resp.status().as_u16())).into_response();
-    }
-    let mut r = Response::builder().status(StatusCode::OK).header(
-        header::CONTENT_TYPE,
-        "application/vnd.android.package-archive",
-    );
-    if let Some(len) = resp.content_length() {
-        r = r.header(header::CONTENT_LENGTH, len);
-    }
-    r.body(Body::from_stream(resp.bytes_stream()))
-        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
-}
-
-#[derive(Deserialize)]
-struct TokenReq {
-    token: String,
-}
-
-async fn set_update_token(State(s): St, Json(req): Json<TokenReq>) -> ApiResult<Value> {
-    let path = s.data_dir.join("github_token");
-    let t = req.token.trim();
-    if t.is_empty() {
-        let _ = std::fs::remove_file(&path);
-    } else {
-        std::fs::write(&path, t)
-            .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    }
-    Ok(Json(
-        json!({ "saved": !t.is_empty(), "has_token": update_token(&s).is_some() }),
-    ))
-}
-
 // ---------- tags ----------
 
 #[derive(Serialize)]
@@ -1023,7 +741,7 @@ async fn tag_detail(State(s): St, Path(id): Path<String>) -> ApiResult<Value> {
             r.get(0)
         })
         .unwrap_or_default();
-    let d = vndb_core::detail::tag_description(&desc);
+    let d = vndb_core::detail::parse_description(&desc);
     Ok(Json(json!({
         "id": id, "name": t.name, "cat": t.cat, "aliases": t.aliases, "vns": t.vns,
         "path": c.tree.path(id), "path_names": c.tree.path_names(id), "children": t.children,
@@ -1084,6 +802,9 @@ impl Default for ShelvesReq {
     }
 }
 
+/// How many covers of a shelf row are visible without scrolling (wide screens show more).
+const SHELF_FRONT: usize = 6;
+
 async fn shelves_overview(State(s): St, body: Option<Json<ShelvesReq>>) -> ApiResult<Value> {
     let req = body.map(|b| b.0).unwrap_or_default();
     let c = s.cat()?;
@@ -1094,9 +815,11 @@ async fn shelves_overview(State(s): St, body: Option<Json<ShelvesReq>>) -> ApiRe
         .clone();
     let marks = s.marks();
     let out = blocking(move || {
+        let per_shelf = req.per_shelf.clamp(1, 60);
         let mut base = req.base.clone();
         base.offset = 0;
-        base.limit = req.per_shelf.clamp(1, 60);
+        // extra candidates, so the same popular VNs do not open every shelf (see below)
+        base.limit = (per_shelf * 3).min(120);
         let all: Vec<(usize, &vndb_core::shelves::Shelf)> = shelves
             .sections
             .iter()
@@ -1137,7 +860,22 @@ async fn shelves_overview(State(s): St, body: Option<Json<ShelvesReq>>) -> ApiRe
             .map(|sec| json!({ "id": sec.id, "title": sec.title, "adult": sec.adult, "shelves": [] }))
             .collect();
         let idx: Vec<usize> = shelves.sections.iter().enumerate().filter(|(_, sec)| req.adult || !sec.adult).map(|(i, _)| i).collect();
-        for (sec, v) in results.into_iter().flatten() {
+        // Shelves come back in page order: a VN already shown near the start of an earlier shelf
+        // moves behind the new ones, so each row opens with something different.
+        let mut results: Vec<(usize, Value)> = results.into_iter().flatten().collect();
+        let mut shown: HashSet<String> = HashSet::new();
+        for (_, v) in results.iter_mut() {
+            let items = v["items"].as_array().cloned().unwrap_or_default();
+            let (fresh, seen): (Vec<Value>, Vec<Value>) = items
+                .into_iter()
+                .partition(|it| !shown.contains(it["id"].as_str().unwrap_or("")));
+            let picked: Vec<Value> = fresh.into_iter().chain(seen).take(per_shelf).collect();
+            for it in picked.iter().take(SHELF_FRONT) {
+                shown.insert(it["id"].as_str().unwrap_or("").to_string());
+            }
+            v["items"] = Value::Array(picked);
+        }
+        for (sec, v) in results {
             if let Some(pos) = idx.iter().position(|i| *i == sec) {
                 if v["total"].as_u64().unwrap_or(0) > 0 {
                     sections[pos]["shelves"].as_array_mut().unwrap().push(v);

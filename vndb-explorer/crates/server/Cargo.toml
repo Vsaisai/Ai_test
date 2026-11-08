@@ -10,7 +10,6 @@ vndb-core = { path = "../core" }
 anyhow = "1"
 axum = "0.7"
 clap = { version = "4", features = ["derive", "env"] }
-dirs = "5"
 mime_guess = "2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
 rust-embed = "8"

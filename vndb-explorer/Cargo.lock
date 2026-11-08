@@ -1788,7 +1788,6 @@ dependencies = [
  "futures-util",
  "http",
  "http-body",
- "http-body-util",
  "pin-project-lite",
  "tokio",
  "tokio-util",
@@ -1925,6 +1924,7 @@ name = "vndb-core"
 version = "0.3.2"
 dependencies = [
  "anyhow",
+ "dirs",
  "libc",
  "reqwest",
  "rusqlite",
@@ -1942,12 +1942,8 @@ version = "0.3.2"
 dependencies = [
  "anyhow",
  "clap",
- "dirs",
- "flate2",
- "reqwest",
- "serde",
  "serde_json",
- "urlencoding",
+ "vndb-core",
 ]
 
 [[package]]
@@ -1957,7 +1953,6 @@ dependencies = [
  "anyhow",
  "axum",
  "clap",
- "dirs",
  "mime_guess",
  "reqwest",
  "rusqlite",

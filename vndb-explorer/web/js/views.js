@@ -24,7 +24,7 @@ const adultOn = () => !!settings().adultTags;
 
 // ---------- tags helpers ----------
 
-export function tagPath(tags, id) {
+function tagPath(tags, id) {
   const out = [];
   let cur = tags.byId.get(id);
   const seen = new Set();
@@ -50,7 +50,7 @@ function lineage(tags, id) {
   return out;
 }
 
-export function findTags(tags, q, limit = 12, { adultOnly = false } = {}) {
+function findTags(tags, q, limit = 12, { adultOnly = false } = {}) {
   const s = q.trim().toLowerCase();
   if (!s) return [];
   const adult = adultOn();
@@ -166,8 +166,6 @@ export async function viewHome(root) {
       h('div', { class: 'home-head' },
         h('p', { class: 'muted' }, `${st.vns.toLocaleString('ru')} визуальных новелл · база от ${(st.dump_timestamp || '').slice(0, 10)}`),
         h('div', { class: 'row-actions' },
-          h('a', { class: 'btn', href: '#/search' }, '🔎 Поиск по тегам'),
-          h('a', { class: 'btn', href: '#/tags' }, '🏷️ Теги'),
           h('button', { class: 'btn', onclick: async () => {
             const r = await api.random({ ...baseRequest(), min_votes: 20 });
             if (r.id) location.hash = `#/vn/${r.id}`;
@@ -314,8 +312,9 @@ export async function viewSearch(root, params) {
   };
   renderChips();
 
-  const text = h('input', { type: 'search', value: st.q, placeholder: 'Название (необязательно)' });
-  text.addEventListener('change', () => { st.q = text.value.trim(); go(); });
+  // the title is typed in the search field of the header (one field for the whole app)
+  const quick = document.getElementById('quickq');
+  if (quick) quick.value = st.q || '';
   const num = (k, ph, w = '6em') => {
     const i = h('input', { type: 'number', value: st[k], placeholder: ph, style: { width: w }, min: 0 });
     i.addEventListener('change', () => { st[k] = i.value; go(); });
@@ -347,7 +346,8 @@ export async function viewSearch(root, params) {
   root.append(
     h('div', { class: 'page-head' }, h('h1', {}, 'Поиск')),
     h('div', { class: 'panel search-panel' },
-      text,
+      st.q ? h('p', { class: 'muted small' }, 'Название содержит: ', h('b', {}, st.q), ' ',
+        h('button', { class: 'linkish', type: 'button', onclick: () => { st.q = ''; go(); } }, '✕ убрать')) : null,
       h('div', { class: 'dev-line' }, h('span', { class: 'muted small' }, 'Где играть:'), devSeg),
       tagPicker(tags, (t, mode) => {
         for (const k of ['must', 'want', 'exclude']) st[k] = st[k].filter(x => x !== t.id);
@@ -596,34 +596,6 @@ function appUpdateBox() {
   };
   setTimeout(runAppCheck, 0);
   return box;
-}
-
-function updateTokenField() {
-  const input = h('input', { type: 'password', placeholder: 'github_pat_…', autocomplete: 'off', spellcheck: 'false' });
-  const note = h('p', { class: 'muted small' }, '');
-  const refresh = () => api.appUpdate().then(u => {
-    note.textContent = u.status === 'ok'
-      ? (u.has_token && u.repo === 'private' ? 'Токен работает.' : 'Токен не нужен: релизы открыты.')
-      : u.status === 'bad_token' ? 'Токен не подошёл: истёк или нет доступа к репозиторию.'
-        : 'Релизы не найдены.';
-  }).catch(async e => {
-    // the page itself may still reach GitHub when the app's server cannot
-    const m = await import('./app.js');
-    const u = await m.directRelease().catch(() => null);
-    note.textContent = u ? 'Токен не нужен: релизы открыты.' : e.message.replace(/^./, c => c.toUpperCase());
-  });
-  const saveTok = async val => {
-    try { await api.setUpdateToken(val); input.value = ''; toast(val ? 'Токен сохранён' : 'Токен удалён'); refresh(); } catch (e) { toast(e.message); }
-  };
-  refresh();
-  return h('details', { class: 'field token-field' },
-    h('summary', { class: 'muted small' }, 'Токен GitHub (не нужен, только для закрытых сборок)'),
-    h('div', { class: 'row' }, input,
-      h('button', { class: 'btn', type: 'button', onclick: () => saveTok(input.value.trim()) }, 'Сохранить'),
-      h('button', { class: 'btn', type: 'button', onclick: () => saveTok('') }, 'Сбросить')),
-    note,
-    h('p', { class: 'muted small' }, 'Обычно не нужен: новые версии публикуются в открытом репозитории Vsaisai/vnshelf-releases. ' +
-      'Токен нужен только для сборок из закрытого репозитория с кодом. Хранится только на этом устройстве.'));
 }
 
 // ---------- VN page ----------
@@ -980,15 +952,27 @@ export async function viewSettings(root) {
   };
   loadSources();
   const dbBox = h('div', {}, spinner());
+  const dbNote = h('div', { class: 'update-banner inline-update', hidden: true });
   const loadStatus = async () => {
     try {
       const st = await api.status();
-      const btn = h('button', { class: 'btn primary', disabled: st.import.running, onclick: async () => {
-        btn.disabled = true; await api.startImport(); toast('Обновление запущено'); setTimeout(loadStatus, 1000);
-      } }, st.ready ? 'Обновить базу из VNDB' : 'Скачать базу VNDB');
+      const full = async e => {
+        e.currentTarget.disabled = true; await api.startImport(); toast('Загрузка базы запущена'); setTimeout(loadStatus, 1000);
+      };
+      // one button: new releases through the API, or a full download when the gap is big (see the policy below)
+      const actions = st.ready
+        ? h('div', { class: 'toolbar' },
+          h('button', { class: 'btn primary', disabled: st.import.running, onclick: async () => {
+            const m = await import('./app.js');
+            const out = m.bannerOut(dbNote, { closable: false });
+            out('Проверяю VNDB…');
+            m.checkUpdates({ force: true, interactive: true, show: out, onStart: () => setTimeout(loadStatus, 800) });
+          } }, 'Проверить обновления базы'),
+          h('button', { class: 'linkish small', disabled: st.import.running, onclick: full }, 'Скачать базу заново целиком'))
+        : h('button', { class: 'btn primary', disabled: st.import.running, onclick: full }, 'Скачать базу VNDB');
       mount(dbBox,
         h('p', {}, st.ready ? `В базе ${st.vns.toLocaleString('ru')} новелл и ${st.tags} тегов. Дамп VNDB от ${st.dump_timestamp}, импорт ${st.imported_at} (UTC).` : 'База не загружена.'),
-        btn, (st.import.running || st.import.error) ? jobPanel(st.import) : (st.import.kind ? h('div', { class: 'muted small' }, `Последняя задача: ${({ import: 'полная загрузка', sync: 'новые релизы', sources: 'индексы каталогов' })[st.import.kind] || st.import.kind} — ${st.import.finished ? 'готово' : '…'}`) : null));
+        actions, (st.import.running || st.import.error) ? jobPanel(st.import) : (st.import.kind ? h('div', { class: 'muted small' }, `Последняя задача: ${({ import: 'полная загрузка', sync: 'новые релизы', sources: 'индексы каталогов' })[st.import.kind] || st.import.kind} — ${st.import.finished ? 'готово' : '…'}`) : null));
       if (st.import.running) setTimeout(loadStatus, 1000);
       else if (st.ready && (st.import.log || []).includes('Ready')) api.resetTags();
     } catch (e) { mount(dbBox, errorBox(e, loadStatus)); }
@@ -1014,21 +998,19 @@ export async function viewSettings(root) {
       field('Размывать обложки и скриншоты', select('blur', [['explicit', 'Только откровенные'], ['suggestive', 'Откровенные и пикантные'], ['off', 'Не размывать']]))),
     h('section', { class: 'panel form' }, h('h2', {}, 'Вид'),
       field('Тема', select('theme', [['auto', 'Как в системе'], ['dark', 'Тёмная'], ['light', 'Светлая']]))),
-    h('section', { class: 'panel form' }, h('h2', {}, 'База данных и обновления'), dbBox,
+    h('section', { class: 'panel form' }, h('h2', {}, 'База данных и обновления'), dbBox, dbNote,
       field('Обновления', select('updatePolicy', [
         ['smart', 'Новые релизы — сами, полную загрузку — спрашивать'],
         ['auto', 'Всё автоматически (и полную загрузку тоже)'],
         ['manual', 'Только вручную']])),
-      h('div', { class: 'toolbar' },
-        h('button', { class: 'btn', onclick: async () => { const m = await import('./app.js'); m.checkUpdates({ force: true, interactive: true }); } }, 'Проверить новые новеллы и релизы VNDB'))),
+      ),
     h('section', { class: 'panel form' }, h('h2', {}, 'Каталоги переводов и сообщества'), srcBox),
     IN_APP
       ? h('section', { class: 'panel form' }, h('h2', {}, 'Приложение'),
         h('p', {}, `VN Shelf для Android, версия ${APP_VERSION}. Новые версии публикуются в GitHub Releases.`),
         appUpdateBox(),
-        updateTokenField(),
         h('div', { class: 'toolbar' },
-          h('button', { class: 'btn', onclick: () => runAppCheck() }, 'Проверить ещё раз'),
+          h('button', { class: 'btn', onclick: () => runAppCheck() }, 'Проверить снова'),
           reset))
       : h('section', { class: 'panel form' }, h('h2', {}, 'Сервер'),
         field('Адрес сервера', text('apiBase', 'пусто = этот же сервер'), 'Нужно для мобильного приложения: например http://192.168.1.10:8080'),

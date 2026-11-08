@@ -3,7 +3,7 @@
 import { api } from './api.js';
 import { h, tagDescription, ruLabel } from './ui.js';
 import { settings } from './store.js';
-import { tagLabel, catRu } from './taxonomy.js';
+import { tagLabel } from './taxonomy.js';
 
 const HOLD_MS = 450;
 const cache = new Map();

@@ -1,8 +1,9 @@
 // Entry point: navigation + hash router.
 import { applyTheme, settings, save, IN_APP, APP_VERSION, RELEASES_PAGE } from './store.js';
-import { h, toast, jobPanel } from './ui.js';
+import { h, jobPanel, progressLine } from './ui.js';
 import { installTagTips } from './tagtip.js';
 import { api } from './api.js';
+import { humanError } from './errors.js';
 import { viewHome, viewShelf, viewSearch, viewTags, viewTag, viewVn, viewMy, viewSettings } from './views.js';
 
 const NAV = [
@@ -37,6 +38,7 @@ async function route() {
   const parts = path.split('/').filter(Boolean);
   const root = document.getElementById('view');
   const my = ++token;
+  if (parts[0] !== 'search') document.getElementById('quickq').value = '';
   const view = h('div', { class: 'view' });
   root.replaceChildren(view);
   document.title = 'VN Shelf';
@@ -60,7 +62,13 @@ async function route() {
 document.getElementById('quicksearch').addEventListener('submit', e => {
   e.preventDefault();
   const q = document.getElementById('quickq').value.trim();
-  location.hash = q ? `#/search?q=${encodeURIComponent(q)}` : '#/search';
+  // on the search page only the title changes: chosen tags and filters stay
+  const [path, query = ''] = location.hash.slice(1).split('?');
+  const params = path === '/search' ? new URLSearchParams(query) : new URLSearchParams();
+  if (q) params.set('q', q); else params.delete('q');
+  params.delete('page');
+  const qs = params.toString();
+  location.hash = qs ? `#/search?${qs}` : '#/search';
 });
 
 // ---------- updates ----------
@@ -83,7 +91,7 @@ const appBanner = h('div', { class: 'update-banner', hidden: true });
 document.body.insertBefore(appBanner, banner);
 const showAppBanner = bannerOut(appBanner);
 
-export function showBanner(text, actions = []) {
+function showBanner(text, actions = []) {
   bannerOut(banner)(text, actions);
 }
 
@@ -97,33 +105,42 @@ async function watchJob(doneText) {
       showBanner(jobPanel(job, { compact: true, link: '#/settings' }));
       continue;
     }
-    if (job.error) showBanner(`⚠️ Обновление не удалось: ${job.error}`);
+    if (job.error) showBanner(`⚠️ Обновление не удалось: ${humanError(job.error)}`);
     else { showBanner(doneText, [h('button', { class: 'btn', onclick: () => location.reload() }, 'Обновить страницу')]); api.resetTags(); }
     return;
   }
 }
 
-export async function checkUpdates({ force = false, interactive = false } = {}) {
+/** Is the local database behind VNDB? Small gaps are fetched through the API, big ones need a full
+ *  download. `show`: where to write the result (default: the banner on top); `onStart`: called when
+ *  a job starts (the settings page shows its progress itself). */
+export async function checkUpdates({ force = false, interactive = false, show = null, onStart = null } = {}) {
   const s = settings();
+  const out = show || showBanner;
   if (!interactive && s.updatePolicy === 'manual') return null;
   if (!force && Date.now() - (s.lastUpdateCheck || 0) < 6 * 3600 * 1000) return null;
   let r;
-  try { r = await api.updates(force); } catch (e) { if (interactive) toast(e.message); return null; }
+  try { r = await api.updates(force); } catch (e) { if (interactive) out(`⚠️ ${e.message}`); return null; }
   if (!r.ready) return r;
   save({ lastUpdateCheck: Date.now() });
   const c = r.check;
   const fresh = c.new_vns + c.new_releases;
-  const full = async () => { await api.startImport(); showBanner('⏳ Скачиваю свежую базу VNDB…'); watchJob('✅ База полностью обновлена.'); };
+  const start = async (call, running, done) => {
+    await call();
+    if (onStart) { out(running); onStart(); } else { out(running); watchJob(done); }
+  };
+  const full = () => start(api.startImport, '⏳ Скачиваю свежую базу VNDB…', '✅ База полностью обновлена.');
+  const sync = () => start(api.sync, `⏳ Добавляю ${c.new_vns} новелл и ${c.new_releases} релизов…`,
+    `✅ Добавлено новелл: ${c.new_vns}, релизов: ${c.new_releases}.`);
   if (c.big) {
     if (s.updatePolicy === 'auto' && !interactive) { full(); return r; }
-    showBanner(`База сильно отстала от VNDB (${reasonRu(c)}). Нужна полная загрузка (~190 МБ).`,
+    out(`База сильно отстала от VNDB (${reasonRu(c)}). Нужна полная загрузка (~190 МБ).`,
       [h('button', { class: 'btn primary', onclick: full }, 'Обновить сейчас')]);
   } else if (fresh > 0) {
-    const go = async () => { await api.sync(); showBanner(`⏳ Добавляю ${c.new_vns} новелл и ${c.new_releases} релизов…`); watchJob(`✅ Добавлено новелл: ${c.new_vns}, релизов: ${c.new_releases}.`); };
-    if (!interactive) go();
-    else showBanner(`На VNDB появилось ${c.new_vns} новелл и ${c.new_releases} релизов.`, [h('button', { class: 'btn primary', onclick: go }, 'Подтянуть')]);
+    if (!interactive) sync();
+    else out(`На VNDB появилось ${c.new_vns} новелл и ${c.new_releases} релизов.`, [h('button', { class: 'btn primary', onclick: sync }, 'Подтянуть')]);
   } else if (interactive) {
-    toast('База актуальна');
+    out('✅ База актуальна: новых новелл и релизов на VNDB нет.');
   }
   return r;
 }
@@ -144,63 +161,53 @@ function newer(a, b) {
   return false;
 }
 
-const PUBLIC_RELEASES = 'https://api.github.com/repos/Vsaisai/vnshelf-releases/releases?per_page=20';
+// Releases of the Android app (public repository, no token needed).
+const RELEASES_API = 'https://api.github.com/repos/Vsaisai/vnshelf-releases/releases?per_page=20';
 
-/** Latest release read by the WebView itself (fallback when the local server is offline). */
-export async function directRelease() {
-  const r = await fetch(PUBLIC_RELEASES, { headers: { Accept: 'application/vnd.github+json' } });
+/** The newest `mobile-v*` release: {version, size, url, page} or null. */
+async function latestRelease() {
+  let r;
+  try {
+    r = await fetch(RELEASES_API, { headers: { Accept: 'application/vnd.github+json' } });
+  } catch {
+    throw new Error('Нет связи с GitHub. Проверьте интернет и повторите.');
+  }
+  if (r.status === 403 || r.status === 429) throw new Error('GitHub временно ограничил проверки — попробуйте через час.');
   if (!r.ok) throw new Error(`GitHub: HTTP ${r.status}`);
   const rel = (await r.json()).find(x => !x.draft && !x.prerelease && /^mobile-v/.test(x.tag_name));
-  if (!rel) return { status: 'ok', version: null };
+  if (!rel) return null;
   const apk = (rel.assets || []).find(a => a.name.endsWith('.apk'));
-  return { status: 'ok', repo: 'public', version: rel.tag_name.replace(/^mobile-v/, ''), html_url: rel.html_url,
-    size: apk?.size, public_url: apk?.browser_download_url };
+  return { version: rel.tag_name.replace(/^mobile-v/, ''), size: apk?.size, url: apk?.browser_download_url, page: rel.html_url };
 }
 
-/** `show`: where to write the result (default: the app-update banner at the top). */
+/** Check for a newer app version. `show`: where to write the result (default: the banner on top). */
 export async function checkAppUpdate({ interactive = false, show = null } = {}) {
-  const out = show || showAppBanner;
   if (!IN_APP) return null;
-  const s = settings();
-  if (!interactive && Date.now() - (s.lastAppCheck || 0) < 24 * 3600 * 1000) return null;
+  const out = show || showAppBanner;
+  if (!interactive && Date.now() - (settings().lastAppCheck || 0) < 24 * 3600 * 1000) return null;
+  // remember the attempt even when it fails: GitHub limits anonymous checks to 60 per hour
+  save({ lastAppCheck: Date.now() });
+  let rel;
   try {
-    let u;
-    try { u = await api.appUpdate(); } catch (e) {
-      // the app's server could not reach GitHub: try from the page (another network stack)
-      u = await directRelease().catch(() => null);
-      if (!u) throw e;
-    }
-    if (u.status === 'private' || u.status === 'bad_token') {
-      if (interactive) {
-        out(u.status === 'private'
-          ? 'Не удалось найти релизы приложения на GitHub. Откройте страницу релизов:'
-          : 'GitHub не принял токен (истёк или нет доступа к репозиторию). Обновите его в «Настройки → Приложение».',
-        [h('a', { class: 'btn primary', href: '#/settings' }, 'Открыть настройки'), h('a', { class: 'btn', href: RELEASES_PAGE }, 'Релизы на GitHub')]);
-      }
-      return null;
-    }
-    save({ lastAppCheck: Date.now() });
-    if (!u.version) { if (interactive) out('Релизов приложения пока нет.'); return null; }
-    const ver = u.version;
-    if (newer(ver, APP_VERSION) && (u.asset_id || u.public_url)) {
-      const size = u.size ? ` (${(u.size / 1048576).toFixed(1).replace('.', ',')} МБ)` : '';
-      const canSelf = !!(window.VNShelfNative && window.VNShelfNative.startUpdate);
-      // the APK comes through the local server, which adds the token for a private repository
-      // through the local server (adds a token if needed) or, without an asset id, straight from GitHub
-      const local = u.asset_id ? `${location.origin}/api/app-update/apk?id=${u.asset_id}&repo=${u.repo || 'public'}` : u.public_url;
-      out(`⬆️ Доступна версия ${ver} (у вас ${APP_VERSION}).`, [
-        canSelf
-          ? h('button', { class: 'btn primary', onclick: () => selfUpdate(local, ver, out) }, `Обновить${size}`)
-          : h('a', { class: 'btn primary', href: u.public_url || RELEASES_PAGE }, `Скачать APK${size}`),
-        h('a', { class: 'btn', href: u.html_url || RELEASES_PAGE }, 'Что нового')]);
-    } else if (interactive) {
-      if (show) out(`✅ У вас последняя версия ${APP_VERSION}.`); else toast(`Установлена последняя версия (${APP_VERSION})`);
-    }
-    return u;
+    rel = await latestRelease();
   } catch (e) {
-    if (interactive) { if (show) out(`⚠️ ${e.message}`, [h('a', { class: 'btn', href: RELEASES_PAGE }, 'Скачать вручную')]); else toast(e.message); }
+    if (interactive) out(`⚠️ ${e.message}`, [h('a', { class: 'btn', href: RELEASES_PAGE }, 'Скачать вручную')]);
     return null;
   }
+  if (!rel || !rel.url) {
+    if (interactive) out('Релизов приложения пока нет.');
+  } else if (newer(rel.version, APP_VERSION)) {
+    const size = rel.size ? ` (${(rel.size / 1048576).toFixed(1).replace('.', ',')} МБ)` : '';
+    const canSelf = !!window.VNShelfNative?.startUpdate;
+    out(`⬆️ Доступна версия ${rel.version} (у вас ${APP_VERSION}).`, [
+      canSelf
+        ? h('button', { class: 'btn primary', onclick: () => selfUpdate(rel.url, rel.version, out) }, `Обновить${size}`)
+        : h('a', { class: 'btn primary', href: rel.url }, `Скачать APK${size}`),
+      h('a', { class: 'btn', href: rel.page || RELEASES_PAGE }, 'Что нового')]);
+  } else if (interactive) {
+    out(`✅ У вас последняя версия ${APP_VERSION}.`);
+  }
+  return rel;
 }
 
 /** Download the new APK inside the app and hand it to the system installer (like Telegram). */
@@ -219,9 +226,7 @@ function selfUpdate(url, ver, out = showAppBanner) {
       const known = st.total > 0;
       const pct = known ? Math.min(100, Math.max(0, Math.floor(st.done * 100 / st.total))) : null;
       const mb = b => (Math.max(0, b) / 1048576).toFixed(1).replace('.', ',');
-      out(h('div', { class: 'job compact' },
-        h('div', { class: 'job-head' }, h('b', {}, pct !== null ? `${pct}%` : '…'), h('span', {}, ` Загружаю версию ${ver} · ${known ? `${mb(st.done)} из ${mb(st.total)} МБ` : `скачано ${mb(st.done)} МБ`}`)),
-        h('div', { class: `bar ${pct === null ? 'indet' : ''}` }, h('i', { style: pct === null ? {} : { width: `${pct}%` } }))));
+      out(progressLine(pct, `Загружаю версию ${ver} · ${known ? `${mb(st.done)} из ${mb(st.total)} МБ` : `скачано ${mb(st.done)} МБ`}`));
       setTimeout(poll, 400);
     } else if (st.state === 'installing') {
       out(`Подтвердите установку версии ${ver} в системном окне.`);

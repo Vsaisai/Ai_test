@@ -138,7 +138,7 @@ cargo build --release
 vndb-explorer/
 ├── crates/core     vndb-core: импорт дампа, SQLite, индекс в памяти, поиск, полки, «где взять»
 ├── crates/server   vndb-web: HTTP-сервер (axum) — REST API, кеш обложек, встроенный интерфейс
-├── crates/cli      vndb-explorer: консольный клиент онлайн-API VNDB (из первой версии)
+├── crates/cli      vndb-explorer: консольный клиент поверх той же локальной базы (тонкая обёртка над core)
 ├── crates/mobile   libvnshelf.so: JNI-обёртка, запускает сервер внутри Android-приложения
 ├── mobile/android  Android-оболочка (Java + WebView), mobile/build-apk.sh — сборка APK
 ├── web/            интерфейс: HTML/CSS/ES-модули без сборки, PWA (manifest + service worker)
@@ -184,8 +184,10 @@ vndb-explorer/
 
 ## Консольный клиент
 
-`crates/cli` — первая версия (онлайн-API VNDB): `vndb-explorer tags`, `search -m/-w/-x`, `vn`,
-`links`. Подробности — `vndb-explorer --help`.
+`crates/cli` — `vndb-explorer`: каталог в терминале — `tags`, `search -m/-w/-x`, `vn`, `links`.
+Работает с той же локальной базой, что приложение и `vndb-web` (поиск, теги и «где взять» берутся из
+`vndb-core`, своей логики у клиента нет). Папку с базой ищет сам; иначе `--data` или `VNDB_DATA`.
+Подробности — `vndb-explorer --help`.
 
 ## Тесты
 
