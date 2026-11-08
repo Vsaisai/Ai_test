@@ -76,7 +76,7 @@ function pathText(tags, id) {
 }
 
 /** Autocomplete input for tags. `onPick(tag, mode)`; mode is 'must' | 'want' | 'exclude'. */
-function tagPicker(tags, onPick, defaultMode = 'want', countOf = t => t.vns) {
+export function tagPicker(tags, onPick, defaultMode = 'want', countOf = t => t.vns) {
   let mode = defaultMode;
   const list = h('div', { class: 'suggest', hidden: true });
   const input = h('input', { type: 'search', placeholder: 'Добавить тег… (например, «петля» или time loop)', autocomplete: 'off' });
@@ -235,7 +235,7 @@ export async function viewShelf(root, id, params) {
   root.append(grid);
 }
 
-function sortSelect(value, onChange) {
+export function sortSelect(value, onChange) {
   return h('label', { class: 'field inline' }, 'Сортировка ',
     h('select', { onchange: e => onChange(e.target.value) },
       Object.entries(SORTS).map(([k, v]) => h('option', { value: k, selected: k === value }, v))));
@@ -254,10 +254,7 @@ function searchHashFromQuery(q) {
 
 // ---------- search ----------
 
-// the filter panel stays open while the search is redrawn after a change
-let filtersOpen = false;
-
-function readSearch(params) {
+export function readSearch(params) {
   const list = k => (params.get(k) || '').split('|').filter(Boolean);
   return {
     q: params.get('q') || '',
@@ -275,7 +272,7 @@ function readSearch(params) {
 }
 
 /** API request of a search state (also used by the tag catalog for its live counts). */
-function searchRequest(st) {
+export function searchRequest(st) {
   const dev = st.dev || 'any';
   // language filter of the search: '' = readable (not only Japanese), a code, or 'any'
   const lang = st.lang === 'any' ? { lang_mode: 'any' } : st.lang ? { lang_mode: 'list', langs: [st.lang] } : {};
@@ -294,7 +291,7 @@ function searchRequest(st) {
   };
 }
 
-function writeSearch(st) {
+export function writeSearch(st) {
   const p = new URLSearchParams();
   if (st.q) p.set('q', st.q);
   for (const k of ['must', 'want', 'exclude', 'plat']) if (st[k].length) p.set(k, st[k].join('|'));
@@ -338,77 +335,43 @@ export async function viewSearch(root, params) {
         t ? tagLabel(t) : `g${id}`,
         h('button', { type: 'button', class: 'chip-x', title: 'Убрать', onclick: () => { st[k] = st[k].filter(x => x !== id); go(); } }, '×'));
     })));
-    if (!chips.children.length) chips.append(h('span', { class: 'muted' }, 'Теги не выбраны. «!» — обязательно, «~» — желательно, «−» — исключить. Нажмите на значок, чтобы сменить.'));
   };
   renderChips();
 
-  const text = h('input', { type: 'search', value: st.q, placeholder: 'Название', enterkeyhint: 'search', 'aria-label': 'Название' });
-  text.addEventListener('change', () => { st.q = text.value.trim(); go(); });
-  const num = (k, ph, w = '6em') => {
-    const i = h('input', { type: 'number', value: st[k], placeholder: ph, style: { width: w }, min: 0 });
-    i.addEventListener('change', () => { st[k] = i.value; go(); });
-    return i;
-  };
-  const platSel = h('div', { class: 'checks' }, ['win', 'lin', 'mac', 'and', 'ios', 'web', 'swi', 'ps5', 'ps4', 'psv', 'xbs', 'xb1', 'n3d'].map(p =>
-    h('label', { class: 'check' }, h('input', {
-      type: 'checkbox', checked: st.plat.includes(p),
-      onchange: e => { st.plat = e.target.checked ? [...st.plat, p] : st.plat.filter(x => x !== p); go(); },
-    }), PLATFORMS[p])));
-  const dev = st.dev || 'any';
-  const devSeg = h('div', { class: 'choice', role: 'group', 'aria-label': 'Где играть' },
-    [['any', 'Везде'], ['pc', '💻 ПК'], ['phone', '📱 Телефон'], ['console', '🎮 Консоли']].map(([v, l]) => h('button', {
-      type: 'button', class: v === dev ? 'on' : '', onclick: () => { st.dev = v; st.plat = []; go(); },
-    }, l)));
-  // where to play and the game's language are filters of this search (not app settings)
-  const LANG_LABEL = { ru: 'Русский', en: 'Английский', any: 'любой язык' };
-  const DEV_LABEL = { pc: 'ПК', phone: 'Телефон', console: 'Консоли' };
-  const active = [DEV_LABEL[st.dev], LANG_LABEL[st.lang], st.plat.length ? st.plat.map(x => PLATFORMS[x] || x).join(', ') : null,
-    (st.lmin || st.lmax) && 'длина', (st.yfrom || st.yto) && 'год', st.votes && 'голоса', st.rating && 'рейтинг', st.free && 'бесплатные'].filter(Boolean);
-  const filters = h('details', { class: 'filters', open: filtersOpen || !!(st.plat.length || st.lmin || st.lmax || st.yfrom || st.yto || st.votes || st.rating || st.free || st.mm),
-    ontoggle: e => { filtersOpen = e.currentTarget.open; } },
-    h('summary', {}, 'Фильтры', active.length ? h('span', { class: 'filter-sum' }, ` · ${active.join(' · ')}`) : null),
-    h('div', { class: 'dev-line' }, h('span', { class: 'muted small' }, 'Где играть'), devSeg),
-    h('div', { class: 'dev-line' }, h('span', { class: 'muted small' }, 'Язык игры'), h('div', { class: 'choice', role: 'group', 'aria-label': 'Язык игры' },
-        [['', 'Есть не на японском'], ['ru', 'Русский'], ['en', 'Английский'], ['any', 'Любой']].map(([v, l]) => h('button', {
-          type: 'button', class: v === (st.lang || '') ? 'on' : '', onclick: () => { st.lang = v; go(); },
-        }, l)))),
-    h('div', { class: 'filter-grid' },
-      h('div', { class: 'field' }, h('span', {}, 'Длина, минут'), h('div', { class: 'pair' }, num('lmin', 'от'), num('lmax', 'до'))),
-      h('div', { class: 'field' }, h('span', {}, 'Год выхода'), h('div', { class: 'pair' }, num('yfrom', 'с'), num('yto', 'по'))),
-      h('div', { class: 'field' }, h('span', {}, 'Мин. голосов'), num('votes', '0')),
-      h('div', { class: 'field' }, h('span', {}, 'Мин. рейтинг (1–10)'), num('rating', '0')),
-      h('div', { class: 'field' }, h('span', {}, 'Мин. желательных тегов'), num('mm', '0')),
-      h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: st.free, onchange: e => { st.free = e.target.checked; go(); } }), 'Только бесплатные'),
-      h('div', { class: 'field full' }, h('span', {}, 'Платформы'), platSel)),
-    h('p', { class: 'muted small' }, 'Спойлеры и откровенный контент — в «Профиль → Настройки».'));
-
-  let counts = null; // tag counts over the current results
-  root.append(
+  // everything chosen, as removable chips (the filters themselves are in the funnel sheet)
+  const LANG_LABEL = { ru: 'Язык: русский', en: 'Язык: английский', any: 'Любой язык' };
+  const DEV_LABEL = { pc: '💻 ПК', phone: '📱 Телефон', console: '🎮 Консоли' };
+  const filterChip = (label, clear) => h('span', { class: 'chip plain' }, label,
+    h('button', { type: 'button', class: 'chip-x', 'aria-label': 'Убрать', onclick: () => { clear(); go(); } }, '×'));
+  const other = [
+    st.q && filterChip(`«${st.q}»`, () => { st.q = ''; }),
+    DEV_LABEL[st.dev] && filterChip(DEV_LABEL[st.dev], () => { st.dev = ''; }),
+    LANG_LABEL[st.lang] && filterChip(LANG_LABEL[st.lang], () => { st.lang = ''; }),
+    st.plat.length && filterChip(st.plat.map(x => PLATFORMS[x] || x).join(', '), () => { st.plat = []; }),
+    (st.lmin || st.lmax) && filterChip(`Длина ${st.lmin || 0}–${st.lmax || '∞'} мин`, () => { st.lmin = ''; st.lmax = ''; }),
+    (st.yfrom || st.yto) && filterChip(`Годы ${st.yfrom || '…'}–${st.yto || '…'}`, () => { st.yfrom = ''; st.yto = ''; }),
+    st.votes && filterChip(`От ${st.votes} голосов`, () => { st.votes = ''; }),
+    st.rating && filterChip(`Рейтинг от ${st.rating}`, () => { st.rating = ''; }),
+    st.mm && filterChip(`Желательных от ${st.mm}`, () => { st.mm = ''; }),
+    st.free && filterChip('Бесплатные', () => { st.free = false; }),
+  ].filter(Boolean);
+  const anything = st.must.length || st.want.length || st.exclude.length || other.length;
+  const openSheet = async () => { const m = await import('./filters.js'); m.openFilters(); };
+  root.append(...[
     h('div', { class: 'page-head' }, h('h1', {}, 'Поиск')),
-    h('div', { class: 'panel search-panel' },
-      text,
-
-      tagPicker(tags, (t, mode) => {
-        for (const k of ['must', 'want', 'exclude']) st[k] = st[k].filter(x => x !== t.id);
-        st[mode].push(t.id);
-        go();
-      }, 'want', t => (counts ? (counts[t.id] || 0) : t.vns)),
-      chips,
-      filters,
-      h('div', { class: 'toolbar' },
-        sortSelect(st.sort, v => { st.sort = v; go(); }),
-        h('a', { class: 'btn', href: `#/tags?${new URLSearchParams(writeSearch(st).split('?')[1] || '')}` }, '🏷️ Каталог тегов'),
-        h('button', { class: 'btn', onclick: () => { location.hash = '#/search'; } }, 'Сбросить'))),
-  );
+    anything ? h('div', { class: 'chosen' }, chips, other) : null,
+    h('div', { class: 'toolbar' },
+      h('button', { class: 'btn primary', type: 'button', onclick: openSheet }, '⚙️ Фильтры'),
+      sortSelect(st.sort, v => { st.sort = v; go(); }),
+      anything ? h('button', { class: 'btn', type: 'button', onclick: () => { location.hash = '#/search'; } }, 'Сбросить всё') : null),
+  ].filter(Boolean));
   if (!st.must.length && !st.want.length && !st.exclude.length && !st.q && !st.plat.length && !st.free && !st.lmax && !st.lmin && !st.dev && !st.lang) {
-    root.append(h('p', { class: 'muted center' }, 'Введите название или добавьте теги — по одному или из «Каталога тегов».'));
+    root.append(h('p', { class: 'muted center' }, 'Введите название в строке сверху или нажмите «Фильтры» — жанры, теги, где играть, язык.'));
     return;
   }
   const req = searchRequest(st);
   root.append(resultGrid(async offset => {
-    const r = await api.search({ ...req, offset, limit: 48, tag_counts: offset === 0 });
-    if (r.tag_counts) counts = r.tag_counts;
-    return r;
+    return api.search({ ...req, offset, limit: 48 });
   }, { wantCount: st.want.length, hl: [...st.must, ...st.want] }));
 }
 
@@ -1060,7 +1023,7 @@ export async function viewSettings(root) {
     toast('Сохранено');
   } }, [['hide', 'Скрывать'], ['blur', 'Показывать, но размывать обложки'], ['show', 'Показывать всё']].map(([v, l]) => h('option', { value: v, selected: v === contentMode }, l)));
 
-  root.append(
+  root.append(...[
     h('div', { class: 'page-head' }, h('a', { class: 'back', href: '#/profile' }, '← Профиль'), h('h1', {}, 'Настройки')),
     h('section', { class: 'panel form' }, h('h2', {}, 'Язык'),
       field('Язык приложения', h('select', { disabled: true }, h('option', {}, 'Русский')), 'Другие языки интерфейса пока не готовы.'),
@@ -1091,5 +1054,5 @@ export async function viewSettings(root) {
       IN_APP ? null : field('Адрес сервера', text('apiBase', 'пусто = этот же сервер'), 'Нужно, только если интерфейс открыт не с того сервера, где база: например http://192.168.1.10:8080'),
       IN_APP ? null : h('p', { class: 'muted small' }, 'Чтобы открыть с телефона: запустите на ПК «vndb-web serve --addr 0.0.0.0:8080» и откройте http://IP-компьютера:8080 в браузере телефона.'),
       h('div', { class: 'toolbar' }, reset)),
-  );
+  ].filter(Boolean));
 }

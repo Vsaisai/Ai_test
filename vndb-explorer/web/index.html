@@ -13,8 +13,16 @@
 </head>
 <body>
   <!-- wide screens: name + menu on top; phones: the menu is at the bottom and there is no top bar -->
+  <!-- logo (not a link) · search · filters; the menu is at the bottom on phones -->
   <header class="topbar">
     <span class="brand"><img src="icons/icon.svg" alt=""><span>VN Shelf</span></span>
+    <form class="topsearch" id="topsearch" role="search">
+      <input type="search" id="topq" placeholder="Поиск по названию" autocomplete="off" enterkeyhint="search" aria-label="Поиск по названию">
+    </form>
+    <button class="filter-btn" id="filterbtn" type="button" aria-label="Фильтры" title="Фильтры">
+      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M3 5h18l-7 8.5V20l-4-2v-4.5z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
+      <span class="filter-dot" hidden></span>
+    </button>
     <nav class="mainnav" id="mainnav"></nav>
   </header>
   <main id="view" tabindex="-1"></main>
