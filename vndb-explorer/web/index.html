@@ -12,11 +12,9 @@
   <link rel="stylesheet" href="app.css">
 </head>
 <body>
+  <!-- wide screens: name + menu on top; phones: the menu is at the bottom and there is no top bar -->
   <header class="topbar">
-    <a class="brand" href="#/"><img src="icons/icon.svg" alt=""><span>VN Shelf</span></a>
-    <form class="quicksearch" id="quicksearch" role="search">
-      <input type="search" id="quickq" placeholder="Название или тег…" autocomplete="off" aria-label="Поиск">
-    </form>
+    <span class="brand"><img src="icons/icon.svg" alt=""><span>VN Shelf</span></span>
     <nav class="mainnav" id="mainnav"></nav>
   </header>
   <main id="view" tabindex="-1"></main>
