@@ -16,6 +16,7 @@ pub mod extlinks;
 pub mod http;
 pub mod import;
 pub mod lang;
+pub mod profile;
 pub mod progress;
 pub mod search;
 pub mod shelves;

@@ -45,7 +45,11 @@ export function save(patch) {
 }
 
 /** Platforms that count as "PC" / "phone". */
-export const PLATFORM_GROUPS = { pc: ['win', 'lin', 'mac'], phone: ['and', 'ios'] };
+export const PLATFORM_GROUPS = {
+  pc: ['win', 'lin', 'mac'],
+  phone: ['and', 'ios'],
+  console: ['swi', 'ps5', 'ps4', 'psv', 'ps3', 'psp', 'ps2', 'xbs', 'xb1', 'n3d', 'nds', 'drc'],
+};
 
 export function langList() {
   return settings().langs.split(',').map(s => s.trim()).filter(Boolean);
@@ -55,13 +59,14 @@ export function langList() {
 export function baseRequest() {
   const s = settings();
   return {
-    lang_mode: s.langMode,
+    // which languages and platforms: chosen in the search (defaults: readable, anywhere)
+    lang_mode: 'readable',
     langs: langList().length ? langList() : ['en'],
     allow_mtl: s.allowMtl,
     ero: s.hideAdult ? 'hide' : 'show',
     spoiler: Number(s.spoiler) || 0,
     hide_cancelled: s.hideCancelled,
-    platforms: PLATFORM_GROUPS[s.platform] || [],
+    platforms: [],
   };
 }
 

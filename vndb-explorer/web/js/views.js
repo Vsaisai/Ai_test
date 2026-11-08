@@ -254,6 +254,9 @@ function searchHashFromQuery(q) {
 
 // ---------- search ----------
 
+// the filter panel stays open while the search is redrawn after a change
+let filtersOpen = false;
+
 function readSearch(params) {
   const list = k => (params.get(k) || '').split('|').filter(Boolean);
   return {
@@ -267,14 +270,18 @@ function readSearch(params) {
     free: params.get('free') === '1',
     mm: params.get('mm') || '',
     dev: params.get('dev') || '',
+    lang: params.get('lang') || '',
   };
 }
 
 /** API request of a search state (also used by the tag catalog for its live counts). */
 function searchRequest(st) {
-  const dev = st.dev || settings().platform || 'any';
+  const dev = st.dev || 'any';
+  // language filter of the search: '' = readable (not only Japanese), a code, or 'any'
+  const lang = st.lang === 'any' ? { lang_mode: 'any' } : st.lang ? { lang_mode: 'list', langs: [st.lang] } : {};
   return {
     ...baseRequest(),
+    ...lang,
     text: st.q || null,
     must: st.must.map(String), want: st.want.map(String), exclude: st.exclude.map(String),
     sort: st.sort,
@@ -295,6 +302,7 @@ function writeSearch(st) {
   for (const k of ['lmin', 'lmax', 'yfrom', 'yto', 'votes', 'rating', 'mm']) if (st[k] !== '' && st[k] !== undefined) p.set(k, st[k]);
   if (st.free) p.set('free', '1');
   if (st.dev) p.set('dev', st.dev);
+  if (st.lang) p.set('lang', st.lang);
   return `#/search?${p}`;
 }
 
@@ -341,13 +349,29 @@ export async function viewSearch(root, params) {
     i.addEventListener('change', () => { st[k] = i.value; go(); });
     return i;
   };
-  const platSel = h('div', { class: 'checks' }, ['win', 'lin', 'mac', 'and', 'ios', 'web', 'swi', 'ps4', 'psv'].map(p =>
+  const platSel = h('div', { class: 'checks' }, ['win', 'lin', 'mac', 'and', 'ios', 'web', 'swi', 'ps5', 'ps4', 'psv', 'xbs', 'xb1', 'n3d'].map(p =>
     h('label', { class: 'check' }, h('input', {
       type: 'checkbox', checked: st.plat.includes(p),
       onchange: e => { st.plat = e.target.checked ? [...st.plat, p] : st.plat.filter(x => x !== p); go(); },
     }), PLATFORMS[p])));
-  const filters = h('details', { class: 'filters', open: !!(st.plat.length || st.lmin || st.lmax || st.yfrom || st.yto || st.votes || st.rating || st.free || st.mm) },
-    h('summary', {}, 'Фильтры'),
+  const dev = st.dev || 'any';
+  const devSeg = h('div', { class: 'choice', role: 'group', 'aria-label': 'Где играть' },
+    [['any', 'Везде'], ['pc', '💻 ПК'], ['phone', '📱 Телефон'], ['console', '🎮 Консоли']].map(([v, l]) => h('button', {
+      type: 'button', class: v === dev ? 'on' : '', onclick: () => { st.dev = v; st.plat = []; go(); },
+    }, l)));
+  // where to play and the game's language are filters of this search (not app settings)
+  const LANG_LABEL = { ru: 'Русский', en: 'Английский', any: 'любой язык' };
+  const DEV_LABEL = { pc: 'ПК', phone: 'Телефон', console: 'Консоли' };
+  const active = [DEV_LABEL[st.dev], LANG_LABEL[st.lang], st.plat.length ? st.plat.map(x => PLATFORMS[x] || x).join(', ') : null,
+    (st.lmin || st.lmax) && 'длина', (st.yfrom || st.yto) && 'год', st.votes && 'голоса', st.rating && 'рейтинг', st.free && 'бесплатные'].filter(Boolean);
+  const filters = h('details', { class: 'filters', open: filtersOpen || !!(st.plat.length || st.lmin || st.lmax || st.yfrom || st.yto || st.votes || st.rating || st.free || st.mm),
+    ontoggle: e => { filtersOpen = e.currentTarget.open; } },
+    h('summary', {}, 'Фильтры', active.length ? h('span', { class: 'filter-sum' }, ` · ${active.join(' · ')}`) : null),
+    h('div', { class: 'dev-line' }, h('span', { class: 'muted small' }, 'Где играть'), devSeg),
+    h('div', { class: 'dev-line' }, h('span', { class: 'muted small' }, 'Язык игры'), h('div', { class: 'choice', role: 'group', 'aria-label': 'Язык игры' },
+        [['', 'Есть не на японском'], ['ru', 'Русский'], ['en', 'Английский'], ['any', 'Любой']].map(([v, l]) => h('button', {
+          type: 'button', class: v === (st.lang || '') ? 'on' : '', onclick: () => { st.lang = v; go(); },
+        }, l)))),
     h('div', { class: 'filter-grid' },
       h('div', { class: 'field' }, h('span', {}, 'Длина, минут'), h('div', { class: 'pair' }, num('lmin', 'от'), num('lmax', 'до'))),
       h('div', { class: 'field' }, h('span', {}, 'Год выхода'), h('div', { class: 'pair' }, num('yfrom', 'с'), num('yto', 'по'))),
@@ -356,19 +380,14 @@ export async function viewSearch(root, params) {
       h('div', { class: 'field' }, h('span', {}, 'Мин. желательных тегов'), num('mm', '0')),
       h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: st.free, onchange: e => { st.free = e.target.checked; go(); } }), 'Только бесплатные'),
       h('div', { class: 'field full' }, h('span', {}, 'Платформы'), platSel)),
-    h('p', { class: 'muted small' }, 'Языки и спойлеры настраиваются в «Настройках».'));
+    h('p', { class: 'muted small' }, 'Спойлеры и откровенный контент — в «Профиль → Настройки».'));
 
-  const dev = st.dev || settings().platform || 'any';
-  const devSeg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Где играть' },
-    [['any', 'Везде'], ['pc', '💻 ПК'], ['phone', '📱 Телефон']].map(([v, l]) => h('button', {
-      type: 'button', class: v === dev ? 'on' : '', onclick: () => { st.dev = v; st.plat = []; go(); },
-    }, l)));
   let counts = null; // tag counts over the current results
   root.append(
     h('div', { class: 'page-head' }, h('h1', {}, 'Поиск')),
     h('div', { class: 'panel search-panel' },
       text,
-      h('div', { class: 'dev-line' }, h('span', { class: 'muted small' }, 'Где играть:'), devSeg),
+
       tagPicker(tags, (t, mode) => {
         for (const k of ['must', 'want', 'exclude']) st[k] = st[k].filter(x => x !== t.id);
         st[mode].push(t.id);
@@ -381,7 +400,7 @@ export async function viewSearch(root, params) {
         h('a', { class: 'btn', href: `#/tags?${new URLSearchParams(writeSearch(st).split('?')[1] || '')}` }, '🏷️ Каталог тегов'),
         h('button', { class: 'btn', onclick: () => { location.hash = '#/search'; } }, 'Сбросить'))),
   );
-  if (!st.must.length && !st.want.length && !st.exclude.length && !st.q && !st.plat.length && !st.free && !st.lmax && !st.lmin && !st.dev) {
+  if (!st.must.length && !st.want.length && !st.exclude.length && !st.q && !st.plat.length && !st.free && !st.lmax && !st.lmin && !st.dev && !st.lang) {
     root.append(h('p', { class: 'muted center' }, 'Введите название или добавьте теги — по одному или из «Каталога тегов».'));
     return;
   }
@@ -666,8 +685,7 @@ function releaseCard(r) {
 }
 
 function releasesBlock(d) {
-  const any = settings().langMode === 'any';
-  const readable = r => any || r.langs.some(l => !CJK.includes(l.lang));
+  const readable = r => r.langs.some(l => !CJK.includes(l.lang));
   const main = d.releases.filter(readable);
   const rest = d.releases.filter(r => !readable(r));
   const section = (title, list) => list.length ? [h('h3', { class: 'rel-group' }, `${title} (${list.length})`), h('div', { class: 'rel-list' }, list.map(releaseCard))] : null;
@@ -1019,43 +1037,59 @@ export async function viewSettings(root) {
   };
   loadStatus();
 
-  const reset = h('button', { class: 'btn', onclick: () => { save({ ...DEFAULTS }); toast('Настройки сброшены'); location.reload(); } }, 'Сбросить настройки');
+  const reset = h('button', { class: 'btn', onclick: () => { save({ ...DEFAULTS }); toast('Настройки сброшены'); location.reload(); } }, 'Сбросить все настройки');
+
+  // languages as checkboxes instead of codes; the order of the list is the priority
+  const LANGS = [['en', 'Английский'], ['ru', 'Русский'], ['uk', 'Украинский'], ['es', 'Испанский'], ['de', 'Немецкий'], ['fr', 'Французский'],
+    ['it', 'Итальянский'], ['pt-br', 'Португальский'], ['pl', 'Польский'], ['vi', 'Вьетнамский'], ['zh-Hans', 'Китайский']];
+  const mine = () => (settings().langs || 'en').split(',').map(x => x.trim()).filter(Boolean);
+  const langChecks = h('div', { class: 'checks' }, LANGS.map(([code, name]) => h('label', { class: 'check' },
+    h('input', { type: 'checkbox', checked: mine().includes(code), onchange: e => {
+      const cur = mine().filter(x => x !== code);
+      const next = e.target.checked ? [...cur, code] : cur;
+      save({ langs: (next.length ? next : ['en']).join(',') }); toast('Сохранено');
+    } }), name)));
+
+  // one switch for explicit content instead of three
+  const contentMode = s.hideAdult ? 'hide' : (s.blur === 'off' && s.adultTags ? 'show' : 'blur');
+  const contentSel = h('select', { onchange: e => {
+    const v = e.target.value;
+    save(v === 'hide' ? { hideAdult: true, adultTags: false, blur: 'suggestive' }
+      : v === 'show' ? { hideAdult: false, adultTags: true, blur: 'off' }
+        : { hideAdult: false, adultTags: false, blur: 'explicit' });
+    toast('Сохранено');
+  } }, [['hide', 'Скрывать'], ['blur', 'Показывать, но размывать обложки'], ['show', 'Показывать всё']].map(([v, l]) => h('option', { value: v, selected: v === contentMode }, l)));
+
   root.append(
-    h('div', { class: 'page-head' }, h('h1', {}, 'Настройки')),
+    h('div', { class: 'page-head' }, h('a', { class: 'back', href: '#/profile' }, '← Профиль'), h('h1', {}, 'Настройки')),
     h('section', { class: 'panel form' }, h('h2', {}, 'Язык'),
-      field('Предпочитаемые языки', text('langs', 'en, ru'), 'Коды через запятую по приоритету: en, ru, uk, es, de… Используются для названий и сортировки ссылок.'),
-      field('Какие новеллы показывать', select('langMode', [['readable', 'Есть на любом языке, кроме японского/китайского/корейского'], ['list', 'Только на языках из списка выше'], ['any', 'Все, даже только на японском']])),
-      check('allowMtl', 'Учитывать машинные переводы'),
-      check('translate', 'Переводить описания и теги на русский', 'Машинный перевод (нужен интернет при первом показе, потом из кэша). На странице новеллы можно переключать «оригинал / перевод».')),
-    h('section', { class: 'panel form' }, h('h2', {}, 'Где играть'),
-      field('Показывать новеллы для', select('platform', [['any', 'Любой платформы'], ['pc', 'ПК (Windows, Linux, macOS)'], ['phone', 'Телефона (Android, iOS)']]),
-        'Действует на полки и поиск; в поиске можно переключить на месте.')),
-    h('section', { class: 'panel form' }, h('h2', {}, 'Контент'),
-      field('Спойлеры в тегах', select('spoiler', [['0', 'Скрывать'], ['1', 'Показывать мелкие'], ['2', 'Показывать все']])),
-      check('hideCancelled', 'Скрывать отменённые проекты'),
-      check('adultTags', 'Теги для взрослых', 'Отдельный список в каталоге тегов, в поиске и на страницах новелл.'),
-      check('hideAdult', 'Скрывать новеллы с откровенными сценами'),
-      field('Размывать обложки и скриншоты', select('blur', [['explicit', 'Только откровенные'], ['suggestive', 'Откровенные и пикантные'], ['off', 'Не размывать']]))),
-    h('section', { class: 'panel form' }, h('h2', {}, 'Вид'),
+      field('Язык приложения', h('select', { disabled: true }, h('option', {}, 'Русский')), 'Другие языки интерфейса пока не готовы.'),
+      h('div', { class: 'field' }, h('span', {}, 'Языки названий и ссылок'), langChecks,
+        h('small', { class: 'muted' }, 'Названия новелл и ссылки «Где взять» показываются сначала на этих языках. Язык самой игры выбирается в поиске.')),
+      check('translate', 'Переводить описания и теги на русский', 'Нужен интернет при первом открытии, потом перевод хранится в приложении.')),
+    h('section', { class: 'panel form' }, h('h2', {}, 'Что показывать'),
+      field('Откровенный контент', contentSel),
+      field('Спойлеры в тегах', select('spoiler', [['0', 'Не показывать'], ['1', 'Показывать небольшие'], ['2', 'Показывать все']]))),
+    h('section', { class: 'panel form' }, h('h2', {}, 'Оформление'),
       field('Тема', select('theme', [['auto', 'Как в системе'], ['dark', 'Тёмная'], ['light', 'Светлая']]))),
-    h('section', { class: 'panel form' }, h('h2', {}, 'База данных и обновления'), dbBox, dbNote,
-      field('Обновления', select('updatePolicy', [
-        ['smart', 'Новые релизы — сами, полную загрузку — спрашивать'],
-        ['auto', 'Всё автоматически (и полную загрузку тоже)'],
-        ['manual', 'Только вручную']])),
-      ),
-    h('section', { class: 'panel form' }, h('h2', {}, 'Каталоги переводов и сообщества'), srcBox),
+    h('section', { class: 'panel form' }, h('h2', {}, 'База новелл'), dbBox, dbNote,
+      field('Новые новеллы с VNDB', select('updatePolicy', [
+        ['smart', 'Подтягивать сами (рекомендуется)'],
+        ['auto', 'Всё сами, даже полную загрузку базы'],
+        ['manual', 'Только когда я нажму']]))),
     IN_APP
       ? h('section', { class: 'panel form' }, h('h2', {}, 'Приложение'),
-        h('p', {}, `VN Shelf для Android, версия ${APP_VERSION}. Новые версии публикуются в GitHub Releases.`),
+        h('p', {}, `Версия ${APP_VERSION}.`),
         appUpdateBox(),
-        h('div', { class: 'toolbar' },
-          h('button', { class: 'btn', onclick: () => runAppCheck() }, 'Проверить снова'),
-          reset))
-      : h('section', { class: 'panel form' }, h('h2', {}, 'Сервер'),
-        field('Адрес сервера', text('apiBase', 'пусто = этот же сервер'), 'Нужно для мобильного приложения: например http://192.168.1.10:8080'),
-        h('p', { class: 'muted small' }, 'Чтобы открыть с телефона: запустите на ПК «vndb-web serve --addr 0.0.0.0:8080» и откройте http://IP-компьютера:8080 в браузере телефона. ' +
-          'Там же можно «Установить приложение» / «На экран Домой».'),
-        reset),
+        h('div', { class: 'toolbar' }, h('button', { class: 'btn', onclick: () => runAppCheck() }, 'Проверить снова')))
+      : null,
+    h('details', { class: 'panel form advanced' }, h('summary', {}, h('h2', {}, 'Дополнительно')),
+      check('allowMtl', 'Считать машинные переводы', 'Новелла с одним машинным переводом тоже попадёт в «можно прочитать».'),
+      check('hideCancelled', 'Скрывать отменённые проекты'),
+      field('Порядок языков вручную', text('langs', 'en, ru'), 'Коды через запятую: en, ru, uk, es, de… Первый — главный.'),
+      h('h3', {}, 'Каталоги переводов и сообщества'), srcBox,
+      IN_APP ? null : field('Адрес сервера', text('apiBase', 'пусто = этот же сервер'), 'Нужно, только если интерфейс открыт не с того сервера, где база: например http://192.168.1.10:8080'),
+      IN_APP ? null : h('p', { class: 'muted small' }, 'Чтобы открыть с телефона: запустите на ПК «vndb-web serve --addr 0.0.0.0:8080» и откройте http://IP-компьютера:8080 в браузере телефона.'),
+      h('div', { class: 'toolbar' }, reset)),
   );
 }

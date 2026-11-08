@@ -273,3 +273,54 @@ fn wanted_tags_do_not_filter_by_default_and_counts_follow_filters() {
     assert_eq!(c.get(&2), Some(&5));
     assert_eq!(c.get(&6), Some(&4));
 }
+
+#[test]
+fn profile_stats_and_achievements_follow_the_lists() {
+    use vndb_core::profile::{compute, Mark};
+    let (_d, cat) = catalog();
+    let m = |vid, status: &str| Mark {
+        vid,
+        status: status.into(),
+    };
+    let empty = compute(&cat, &[], 2026);
+    assert_eq!(empty.stats.read, 0);
+    assert!(empty.achievements.iter().all(|a| !a.done));
+
+    // two read (one of them favourite), one dropped, one wished; VN 1 has Tragedy (under Drama) and Comedy
+    let p = compute(
+        &cat,
+        &[
+            m(1, "finished"),
+            m(3, "favorite"),
+            m(2, "dropped"),
+            m(4, "wish"),
+        ],
+        2026,
+    );
+    assert_eq!(
+        (
+            p.stats.read,
+            p.stats.favorite,
+            p.stats.dropped,
+            p.stats.wish
+        ),
+        (2, 1, 1, 1)
+    );
+    let names: Vec<&str> = p.stats.genres.iter().map(|g| g.name.as_str()).collect();
+    assert_eq!(names, vec!["Comedy", "Drama"]);
+    let first = p.achievements.iter().find(|a| a.id == "first").unwrap();
+    assert!(first.done);
+    let five = p.achievements.iter().find(|a| a.id == "reader5").unwrap();
+    assert_eq!((five.progress, five.goal, five.done), (2, 5, false));
+    // a dropped VN breaks "never give up"
+    assert_eq!(
+        p.achievements
+            .iter()
+            .find(|a| a.id == "finisher")
+            .unwrap()
+            .progress,
+        0
+    );
+    // VN 3 has 50 votes: a hidden gem
+    assert!(p.achievements.iter().find(|a| a.id == "gem").unwrap().done);
+}
