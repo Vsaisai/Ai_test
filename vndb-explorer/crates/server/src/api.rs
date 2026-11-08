@@ -390,6 +390,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/vn/:id/prices", get(vn_prices))
         .route("/api/random", post(random))
         .route("/api/my", get(my_list))
+        .route("/api/profile", get(profile).put(save_profile))
         .route("/api/my/:id", put(set_mark).delete(delete_mark))
         .route("/img/*path", get(image))
         .fallback(static_file)
@@ -1111,6 +1112,89 @@ async fn my_list(State(s): St) -> ApiResult<Value> {
         .filter_map(Result::ok)
         .collect();
     Ok(Json(json!({ "statuses": STATUSES, "marks": rows })))
+}
+
+// ---------- profile (name, avatar, stats, achievements) ----------
+
+fn user_setting(c: &Connection, key: &str) -> Option<String> {
+    c.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| {
+        r.get(0)
+    })
+    .ok()
+}
+
+async fn profile(State(s): St) -> ApiResult<Value> {
+    let (name, avatar, marks) = {
+        let u = s.user.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut st = u
+            .prepare("SELECT vid, status FROM marks")
+            .map_err(anyhow::Error::from)?;
+        let marks: Vec<vndb_core::profile::Mark> = st
+            .query_map([], |r| {
+                Ok(vndb_core::profile::Mark {
+                    vid: r.get(0)?,
+                    status: r.get(1)?,
+                })
+            })
+            .map_err(anyhow::Error::from)?
+            .filter_map(Result::ok)
+            .collect();
+        (
+            user_setting(&u, "profile_name"),
+            user_setting(&u, "profile_avatar"),
+            marks,
+        )
+    };
+    let cat = s.cat()?;
+    let year: u32 = cat
+        .dump_timestamp
+        .get(..4)
+        .and_then(|y| y.parse().ok())
+        .unwrap_or(2026);
+    let p = blocking(move || Ok(vndb_core::profile::compute(&cat, &marks, year))).await?;
+    Ok(Json(
+        json!({ "name": name, "avatar": avatar, "stats": p.stats, "achievements": p.achievements }),
+    ))
+}
+
+#[derive(Deserialize)]
+struct ProfileReq {
+    name: Option<String>,
+    /// `data:image/...;base64,...` (resized on the device), or "" to remove
+    avatar: Option<String>,
+}
+
+async fn save_profile(State(s): St, Json(req): Json<ProfileReq>) -> ApiResult<Value> {
+    let u = s.user.lock().unwrap_or_else(PoisonError::into_inner);
+    let set = |k: &str, v: &str| -> Result<(), ApiError> {
+        if v.is_empty() {
+            u.execute("DELETE FROM settings WHERE key = ?1", [k])
+                .map_err(anyhow::Error::from)?;
+        } else {
+            u.execute(
+                "INSERT OR REPLACE INTO settings(key, value) VALUES (?1, ?2)",
+                [k, v],
+            )
+            .map_err(anyhow::Error::from)?;
+        }
+        Ok(())
+    };
+    if let Some(n) = &req.name {
+        set(
+            "profile_name",
+            &n.trim().chars().take(40).collect::<String>(),
+        )?;
+    }
+    if let Some(a) = &req.avatar {
+        if !a.is_empty() && (!a.starts_with("data:image/") || a.len() > 400_000) {
+            return Err(ApiError(
+                StatusCode::BAD_REQUEST,
+                "аватарка должна быть картинкой до 300 КБ".into(),
+            ));
+        }
+        set("profile_avatar", a)?;
+    }
+    Ok(Json(json!({ "saved": true })))
 }
 
 #[derive(Deserialize)]

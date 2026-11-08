@@ -4,6 +4,7 @@ import { h, jobPanel, progressLine } from './ui.js';
 import { installTagTips } from './tagtip.js';
 import { api } from './api.js';
 import { humanError } from './errors.js';
+import { viewProfile } from './profile.js';
 import { viewHome, viewShelf, viewSearch, viewTags, viewTag, viewVn, viewMy, viewSettings } from './views.js';
 
 // One entry per place: the tag catalog is part of the search, the logo is not a second "home" button.
@@ -11,7 +12,7 @@ const NAV = [
   ['#/', '📚', 'Главная'],
   ['#/search', '🔎', 'Поиск'],
   ['#/my', '❤️', 'Мои полки'],
-  ['#/settings', '⚙️', 'Настройки'],
+  ['#/profile', '👤', 'Профиль'],
 ];
 
 function buildNav() {
@@ -25,7 +26,8 @@ function highlightNav(path) {
   document.querySelectorAll('[data-href]').forEach(a => {
     const href = a.dataset.href;
     const on = href === '#/' ? ['#/', '#/shelf', '#/vn'].includes(section)
-      : section.startsWith(href) || (href === '#/search' && (section === '#/tags' || section === '#/tag'));
+      : section.startsWith(href) || (href === '#/search' && (section === '#/tags' || section === '#/tag'))
+        || (href === '#/profile' && section === '#/settings');
     a.classList.toggle('on', on);
   });
 }
@@ -55,6 +57,7 @@ async function route() {
     case 'vn': return viewVn(target, parts[1], params);
     case 'my': return viewMy(target, parts[1]);
     case 'settings': return viewSettings(target);
+    case 'profile': return viewProfile(target);
     default: view.append(h('p', {}, 'Страница не найдена. ', h('a', { href: '#/' }, 'На главную')));
   }
 }
@@ -93,8 +96,14 @@ async function watchJob(doneText) {
       showBanner(jobPanel(job, { compact: true, link: '#/settings' }));
       continue;
     }
-    if (job.error) showBanner(`⚠️ Обновление не удалось: ${humanError(job.error)}`);
-    else { showBanner(doneText, [h('button', { class: 'btn', onclick: () => location.reload() }, 'Обновить страницу')]); api.resetTags(); }
+    if (job.error) { showBanner(`⚠️ Обновление не удалось: ${humanError(job.error)}`); return; }
+    // the data changed: redraw the current page by itself instead of asking to reload
+    api.resetTags();
+    route();
+    const text = doneText || ({ import: '✅ База VNDB загружена.', sync: '✅ Новые новеллы и релизы добавлены.', sources: '✅ Каталоги переводов обновлены.' })[job.kind] || '✅ Готово.';
+    showBanner(text);
+    const shown = banner.textContent;
+    setTimeout(() => { if (banner.textContent === shown) banner.hidden = true; }, 6000);
     return;
   }
 }
@@ -237,7 +246,7 @@ window.addEventListener('hashchange', route);
 route();
 setTimeout(() => checkUpdates(), 1500);
 // a job may already be running (e.g. the app was reopened during a download)
-api.status().then(st => { if (st.ready && st.import?.running) watchJob('✅ Готово.'); }).catch(() => {});
+api.status().then(st => { if (st.ready && st.import?.running) watchJob(); }).catch(() => {});
 setTimeout(() => checkAppUpdate(), 4000);
 
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {

@@ -71,9 +71,11 @@ export const api = {
   shelves: (base, adult, perShelf = 16) => call('POST', '/api/shelves', { base, adult, per_shelf: perShelf }),
   shelf: (id, base, sort, offset, limit = 48) => call('POST', `/api/shelves/${encodeURIComponent(id)}`, { base, sort, offset, limit }),
   random: req => call('POST', '/api/random', req),
-  vn: id => call('GET', `/api/vn/${id}?langs=${encodeURIComponent(langList().join(','))}&any_lang=${settings().langMode === 'any'}`),
+  vn: id => call('GET', `/api/vn/${id}?langs=${encodeURIComponent(langList().join(','))}&any_lang=false`),
   prices: (id, cc) => call('GET', `/api/vn/${id}/prices?cc=${encodeURIComponent(cc)}`),
   my: () => call('GET', '/api/my'),
+  profile: () => call('GET', '/api/profile'),
+  saveProfile: p => call('PUT', '/api/profile', p),
   mark: (id, status, note) => call('PUT', `/api/my/${id}`, { status, note }),
   unmark: id => call('DELETE', `/api/my/${id}`),
 };
