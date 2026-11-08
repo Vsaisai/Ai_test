@@ -33,7 +33,7 @@ server/                     сервер
 client/                     клиент
   web/                      интерфейс (HTML/CSS/JS) — сервер берёт его отсюда, можно править
   open-client               открыть интерфейс окном-приложением
-  cli/vndb-explorer(.exe)   консольный клиент онлайн-API VNDB:
+  cli/vndb-explorer(.exe)   консольный клиент (та же база из server/data):
                             vndb-explorer search -m "Science Fiction" -w "Time Travel" --links
 
 ОБНОВЛЕНИЕ ПРОГРАММЫ

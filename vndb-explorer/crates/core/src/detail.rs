@@ -310,7 +310,7 @@ impl DescPart {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct TagDescription {
+pub struct Description {
     /// Plain text without markup and without the example links (for translation).
     pub text: String,
     pub parts: Vec<DescPart>,
@@ -336,9 +336,9 @@ fn vndb_link(url: &str) -> Option<(char, u32)> {
     Some((kind, id))
 }
 
-/// Split a VNDB tag description into readable parts: screenshot links ("Example 1") become
+/// Split a VNDB description (tag or VN) into readable parts: screenshot links ("Example 1") become
 /// image examples instead of dangling words, `/gN` links become links to tags.
-pub fn tag_description(raw: &str) -> TagDescription {
+pub fn parse_description(raw: &str) -> Description {
     let mut parts: Vec<DescPart> = Vec::new();
     let mut examples = Vec::new();
     let push =
@@ -424,7 +424,7 @@ pub fn tag_description(raw: &str) -> TagDescription {
     }
     parts.retain(|p| !p.text.is_empty());
     let text: String = parts.iter().map(|p| p.text.as_str()).collect();
-    TagDescription {
+    Description {
         text: text.trim().to_string(),
         parts,
         examples,
@@ -770,6 +770,7 @@ pub fn detail(
         }
     }
 
+    let desc = parse_description(&description);
     Ok(Some(Detail {
         card: card(v, order, vec![], vec![]),
         titles: v.titles.clone(),
@@ -779,8 +780,8 @@ pub fn detail(
             .filter(|s| !s.is_empty())
             .map(String::from)
             .collect(),
-        description: clean_bbcode(&description),
-        description_parts: tag_description(&description).parts,
+        description: desc.text,
+        description_parts: desc.parts,
         developers: v
             .developers
             .iter()
@@ -862,7 +863,7 @@ mod tests {
 
     #[test]
     fn tag_description_examples_and_links() {
-        let d = tag_description("Box at the bottom.\n\nIf not, use the [url=http://vndb.org/g398]Floating Textbox[/url] tag.\n\n[url=http://s.vndb.org/sf/01/6101.jpg]Example 1[/url]\n[url=https://s2.vndb.org/sf/04/1304.jpg]NSFW Example 2[/url]\nSee [url=https://en.wikipedia.org/wiki/X]Wikipedia[/url].");
+        let d = parse_description("Box at the bottom.\n\nIf not, use the [url=http://vndb.org/g398]Floating Textbox[/url] tag.\n\n[url=http://s.vndb.org/sf/01/6101.jpg]Example 1[/url]\n[url=https://s2.vndb.org/sf/04/1304.jpg]NSFW Example 2[/url]\nSee [url=https://en.wikipedia.org/wiki/X]Wikipedia[/url].");
         assert_eq!(
             d.text,
             "Box at the bottom.\n\nIf not, use the Floating Textbox tag.\n\nSee Wikipedia."
@@ -886,7 +887,7 @@ mod tests {
             Some("https://en.wikipedia.org/wiki/X")
         );
         assert!(!d.text.contains("Example"));
-        let v = tag_description("Sequel to [url=/v17]Ever17[/url], see [url=/p12]the studio[/url]. [spoiler]x[/spoiler]");
+        let v = parse_description("Sequel to [url=/v17]Ever17[/url], see [url=/p12]the studio[/url]. [spoiler]x[/spoiler]");
         assert_eq!(v.parts[1].vn, Some(17));
         assert_eq!(v.parts[3].url.as_deref(), Some("https://vndb.org/p12"));
         assert!(v.text.ends_with("[spoiler]x[/spoiler]"));

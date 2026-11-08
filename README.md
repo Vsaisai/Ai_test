@@ -55,7 +55,7 @@ vndb-explorer/
 ├── crates/core     ядро: импорт дампа VNDB, база SQLite, поиск, полки, «где взять», синхронизация
 ├── crates/server   vndb-web: локальный сервер — REST API и веб-интерфейс
 ├── crates/mobile   библиотека для Android (тот же сервер внутри приложения)
-├── crates/cli      консольный клиент онлайн-API VNDB
+├── crates/cli      консольный клиент (та же локальная база)
 ├── web/            интерфейс (HTML/CSS/JS, PWA)
 ├── desktop/        сборка ПК-версии: папки server/ и client/
 └── mobile/android  Android-приложение

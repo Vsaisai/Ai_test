@@ -43,8 +43,6 @@ export const api = {
   },
   startImport: () => call('POST', '/api/import', {}),
   updates: (force = false) => call('GET', `/api/updates${force ? '?force=true' : ''}`),
-  appUpdate: () => call('GET', '/api/app-update'),
-  setUpdateToken: token => call('PUT', '/api/app-update/token', { token }),
   async translate(texts, to = 'ru') {
     // after a refusal (rate limit) give the free translators a break instead of asking on every page
     if (Date.now() < translateDownUntil) throw new Error('Переводчик временно недоступен — показан оригинал.');

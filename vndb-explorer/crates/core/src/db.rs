@@ -159,3 +159,22 @@ pub fn free_space(dir: &std::path::Path) -> Option<u64> {
 pub fn free_space(_dir: &std::path::Path) -> Option<u64> {
     None
 }
+
+/// Where the local database lives when no `--data` / `VNDB_DATA` is given: next to the program
+/// in the PC package (`server/data`, also found from `client/cli`), otherwise the user data folder.
+pub fn default_data_dir() -> std::path::PathBuf {
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|p| p.to_path_buf()))
+    {
+        for rel in ["data", "../../server/data"] {
+            let p = dir.join(rel);
+            if p.join("catalog.sqlite").exists() {
+                return p;
+            }
+        }
+    }
+    dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("vndb-explorer")
+}

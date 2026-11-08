@@ -55,15 +55,9 @@ enum Cmd {
     },
 }
 
-fn default_data_dir() -> PathBuf {
-    dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("vndb-explorer")
-}
-
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let data = cli.data.unwrap_or_else(default_data_dir);
+    let data = cli.data.unwrap_or_else(vndb_core::db::default_data_dir);
     std::fs::create_dir_all(&data)?;
     match cli.cmd.unwrap_or(Cmd::Serve {
         addr: "127.0.0.1:8080".parse()?,

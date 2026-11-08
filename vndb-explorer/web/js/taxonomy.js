@@ -81,7 +81,7 @@ export const ADULT = {
 };
 
 /** Russian names of VNDB tag categories (roots and second level). */
-export const CAT_RU = {
+const CAT_RU = {
   Theme: 'Темы', Character: 'Персонажи', Setting: 'Сеттинг', Plot: 'Сюжет', Style: 'Стиль и геймплей',
   General: 'Общее', Action: 'Экшн', Comedy: 'Комедия', Drama: 'Драма', Educational: 'Обучающее', Fantasy: 'Фэнтези',
   Horror: 'Ужасы', Mystery: 'Мистика', 'Other Elements': 'Другие элементы', Romance: 'Романтика',

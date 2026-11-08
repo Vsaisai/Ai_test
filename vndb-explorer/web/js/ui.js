@@ -34,7 +34,7 @@ export const PLATFORMS = {
   nds: 'DS', vnd: 'VNDS', dvd: 'DVD', mob: 'Мобильные (старые)', drc: 'Dreamcast', oth: 'Другое',
 };
 
-export const KIND = ['офиц.', 'фан-перевод', 'машинный'];
+const KIND = ['офиц.', 'фан-перевод', 'машинный'];
 
 export function langBadges(langs, max = 4) {
   const shown = langs.slice(0, max);
@@ -60,7 +60,7 @@ export function fmtLength(min) {
   return `~${hr} ч`;
 }
 
-export function shouldBlur(sexual) {
+function shouldBlur(sexual) {
   const b = settings().blur;
   if (b === 'off') return false;
   if (b === 'suggestive') return sexual > 40;
@@ -143,8 +143,15 @@ export function debounce(fn, ms = 250) {
 
 // ---------- job progress (download / import / sync) ----------
 
-export const JOB_TITLES = { import: 'Загрузка базы VNDB', sync: 'Новые новеллы и релизы', sources: 'Индексы каталогов' };
+const JOB_TITLES = { import: 'Загрузка базы VNDB', sync: 'Новые новеллы и релизы', sources: 'Индексы каталогов' };
 let detailsOpen = false;
+
+/** Compact progress line: "42% text" and a bar (null percent = unknown size, running stripe). */
+export function progressLine(percent, text) {
+  return h('div', { class: 'job compact' },
+    h('div', { class: 'job-head' }, h('b', {}, percent === null ? '…' : `${Math.floor(percent)}%`), h('span', {}, ` ${text}`)),
+    bar(percent));
+}
 
 function bar(percent, cls = '') {
   const indet = percent === null || percent === undefined;
@@ -245,20 +252,6 @@ export function tagDescription(t, { onNavigate, examples = true } = {}) {
 }
 
 const nameCache = new Map();
-/** Russian names for VNDB tag / category names: curated first, machine translation (cached) for the rest.
- *  Returns the input unchanged when translation is off or unavailable. */
-export async function ruNames(names) {
-  const out = names.map(n => (catRu(n) !== n ? catRu(n) : nameCache.get(n) || n));
-  if (!settings().translate) return names.map(n => catRu(n));
-  const todo = [...new Set(names.filter((n, i) => out[i] === n && /[A-Za-z]/.test(n)))];
-  if (todo.length) {
-    try {
-      const r = await api.translate(todo);
-      todo.forEach((n, i) => { if (r.translations[i]) nameCache.set(n, r.translations[i]); });
-    } catch { /* offline: keep English */ }
-  }
-  return names.map(n => (catRu(n) !== n ? catRu(n) : nameCache.get(n) || n));
-}
 
 let pending = new Map(); // name -> [elements]
 let flushTimer = null;

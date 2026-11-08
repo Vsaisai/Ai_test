@@ -15,6 +15,7 @@ tar = "0.4"
 zstd = "0.13"
 urlencoding = "2"
 unicode-normalization = "0.1"
+dirs = "5"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
