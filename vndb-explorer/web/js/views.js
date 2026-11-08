@@ -635,7 +635,8 @@ const SOURCE_TITLES = {
   store: 'Купить в магазине',
   direct: 'Купить у разработчика / издателя',
   fan_patch: 'Фанатские переводы и патчи',
-  search: 'На VNDB ссылок нет — поискать на',
+  original: 'Оригинал — купить или скачать',
+  search: 'Ссылок на VNDB нет — поискать на',
 };
 
 const RTYPE = { trial: 'Демоверсия', partial: 'Частичный' };
@@ -720,6 +721,7 @@ export async function viewVn(root, id, params = new URLSearchParams()) {
   const where = h('section', { class: 'panel where' }, h('h2', {}, 'Где взять'),
     Object.entries(groups).map(([kind, list]) => h('div', { class: `where-group ${kind}` },
       h('h3', {}, SOURCE_TITLES[kind] || kind),
+      kind === 'original' && groups.fan_patch ? h('p', { class: 'muted small' }, 'Фанатскому переводу обычно нужна купленная оригинальная игра.') : null,
       collapsible(list.map(src => h('div', { class: 'source' },
         h('a', { href: src.url, target: '_blank', rel: 'noopener noreferrer' }, src.site),
         src.langs.length ? h('span', { class: 'langs' }, src.langs.map(l => h('span', { class: 'lang' }, l))) : null,

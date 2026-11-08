@@ -71,6 +71,8 @@ pub enum SourceKind {
     Direct,
     /// Fan translation / patch
     FanPatch,
+    /// The original (usually Japanese) official release: buy it to play, or to apply a fan patch
+    Original,
     /// Nothing known: search links
     Search,
 }
@@ -246,6 +248,38 @@ pub fn classify(
             });
         }
     }
+    // a release in a readable language with no shop/download link (e.g. an unofficial machine
+    // translation) still exists: point to its VNDB page instead of hiding it
+    for r in releases {
+        let langs: Vec<&ReleaseLang> = r.langs.iter().filter(|l| accept(&l.lang)).collect();
+        if langs.is_empty() || r.links.iter().any(|l| seen.contains(&l.url)) {
+            continue;
+        }
+        let num = r.id.trim_start_matches('r');
+        let url = format!("https://vndb.org/r{num}");
+        if !seen.insert(url.clone()) {
+            continue;
+        }
+        let mut lnames: Vec<String> = langs.iter().map(|l| l.lang.clone()).collect();
+        lnames.sort_by_key(|l| (rank(order, l), l.clone()));
+        let mut note = r.title.clone();
+        if let Some(d) = &r.released {
+            note.push_str(&format!(" ({d})"));
+        }
+        out.push(Source {
+            kind: if r.official {
+                SourceKind::Store
+            } else {
+                SourceKind::FanPatch
+            },
+            site: "Релиз на VNDB (ссылки на скачивание нет)".into(),
+            url,
+            release: Some(note),
+            langs: lnames,
+            mtl: langs.iter().all(|l| l.mtl),
+            platforms: r.platforms.clone(),
+        });
+    }
     out.sort_by_key(|s| {
         (
             s.kind,
@@ -254,6 +288,64 @@ pub fn classify(
             site_rank(&s.url),
             s.site.to_lowercase(),
         )
+    });
+    out
+}
+
+/// Shops and the developer's site of the official releases in other (original) languages.
+pub fn originals(
+    releases: &[Release],
+    accept: &dyn Fn(&str) -> bool,
+    skip: &HashSet<String>,
+) -> Vec<Source> {
+    let mut out = Vec::new();
+    let mut seen = skip.clone();
+    for r in releases.iter().filter(|r| r.official && !r.patch) {
+        if r.langs.iter().any(|l| accept(&l.lang)) {
+            continue;
+        }
+        let langs: Vec<String> = r.langs.iter().map(|l| l.lang.clone()).collect();
+        for l in &r.links {
+            let s = l.site.as_str();
+            if !(s == "website" || DOWNLOAD_SITES.contains(&s) || STORES.contains(&s))
+                || !seen.insert(l.url.clone())
+            {
+                continue;
+            }
+            let mut note = r.title.clone();
+            if let Some(d) = &r.released {
+                note.push_str(&format!(" ({d})"));
+            }
+            out.push(Source {
+                kind: SourceKind::Original,
+                site: if s == "website" {
+                    "Официальный сайт".into()
+                } else {
+                    l.label.clone()
+                },
+                url: l.url.clone(),
+                release: Some(note),
+                langs: langs.clone(),
+                mtl: false,
+                platforms: r.platforms.clone(),
+            });
+        }
+    }
+    // stores first (where you can buy right now), the developer's page last
+    const DIGITAL: &[&str] = &[
+        "dlsite.com",
+        "dmm.co.jp",
+        "dl.getchu.com",
+        "gyutto.com",
+        "digiket.com",
+        "steampowered.com",
+    ];
+    out.sort_by_key(|s| {
+        let digital = DIGITAL
+            .iter()
+            .position(|d| s.url.contains(d))
+            .unwrap_or(DIGITAL.len());
+        (s.site == "Официальный сайт", digital, site_rank(&s.url))
     });
     out
 }
@@ -701,12 +793,21 @@ pub fn detail(
             });
         }
     }
-    if !sources
-        .iter()
-        .any(|s| matches!(s.kind, SourceKind::Free | SourceKind::Store))
-    {
+    let known: HashSet<String> = sources.iter().map(|s| s.url.clone()).collect();
+    let original = if accept_any {
+        Vec::new()
+    } else {
+        originals(&releases, &accept, &known)
+    };
+    if !sources.iter().chain(&original).any(|s| {
+        matches!(
+            s.kind,
+            SourceKind::Free | SourceKind::Store | SourceKind::Original
+        )
+    }) {
         sources.extend(fallback(&title));
     }
+    sources.extend(original);
 
     let mut screenshots = Vec::new();
     {
