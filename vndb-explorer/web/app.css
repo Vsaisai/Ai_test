@@ -59,8 +59,6 @@ input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible
 }
 .brand { display: flex; align-items: center; gap: 8px; font-weight: 700; color: var(--text); white-space: nowrap; }
 .brand img { width: 28px; height: 28px; }
-.quicksearch { flex: 1; max-width: 520px; }
-.quicksearch input { width: 100%; }
 .mainnav { display: flex; gap: 4px; margin-left: auto; }
 .mainnav a, .bottomnav a { color: var(--muted); padding: 6px 10px; border-radius: 10px; display: flex; align-items: center; gap: 6px; }
 .mainnav a.on, .bottomnav a.on { color: var(--text); background: var(--panel-2); }
@@ -68,6 +66,8 @@ input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible
 .bottomnav { display: none; }
 
 @media (max-width: 760px) {
+  .topbar { display: none; }
+  #view { padding-top: env(safe-area-inset-top); }
   .mainnav { display: none; }
   .brand span { display: none; }
   .bottomnav {
@@ -454,3 +454,9 @@ body.lb-open { overflow: hidden; }
 .rchip { font-size: 12px; }
 @media (pointer: coarse) { .shelf-title { display: inline-block; padding: 8px 0; } }
 .card .langs { flex-wrap: nowrap; overflow: hidden; }
+
+.shelf-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; color: var(--text); }
+.shelf-head:hover { text-decoration: none; }
+.shelf-head:hover .shelf-title { text-decoration: underline; }
+.shelf-head .shelf-all { color: var(--accent); }
+.page-head .back { display: inline-block; padding: 8px 0; }

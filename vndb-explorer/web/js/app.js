@@ -6,11 +6,11 @@ import { api } from './api.js';
 import { humanError } from './errors.js';
 import { viewHome, viewShelf, viewSearch, viewTags, viewTag, viewVn, viewMy, viewSettings } from './views.js';
 
+// One entry per place: the tag catalog is part of the search, the logo is not a second "home" button.
 const NAV = [
-  ['#/', '📚', 'Полки'],
+  ['#/', '📚', 'Главная'],
   ['#/search', '🔎', 'Поиск'],
-  ['#/tags', '🏷️', 'Теги'],
-  ['#/my', '❤️', 'Мои'],
+  ['#/my', '❤️', 'Мои полки'],
   ['#/settings', '⚙️', 'Настройки'],
 ];
 
@@ -24,7 +24,8 @@ function highlightNav(path) {
   const section = '#/' + (path.split('/')[1] || '');
   document.querySelectorAll('[data-href]').forEach(a => {
     const href = a.dataset.href;
-    const on = href === '#/' ? ['#/', '#/shelf', '#/vn'].includes(section) : section.startsWith(href) || (href === '#/tags' && section === '#/tag');
+    const on = href === '#/' ? ['#/', '#/shelf', '#/vn'].includes(section)
+      : section.startsWith(href) || (href === '#/search' && (section === '#/tags' || section === '#/tag'));
     a.classList.toggle('on', on);
   });
 }
@@ -38,7 +39,6 @@ async function route() {
   const parts = path.split('/').filter(Boolean);
   const root = document.getElementById('view');
   const my = ++token;
-  if (parts[0] !== 'search') document.getElementById('quickq').value = '';
   const view = h('div', { class: 'view' });
   root.replaceChildren(view);
   document.title = 'VN Shelf';
@@ -58,18 +58,6 @@ async function route() {
     default: view.append(h('p', {}, 'Страница не найдена. ', h('a', { href: '#/' }, 'На главную')));
   }
 }
-
-document.getElementById('quicksearch').addEventListener('submit', e => {
-  e.preventDefault();
-  const q = document.getElementById('quickq').value.trim();
-  // on the search page only the title changes: chosen tags and filters stay
-  const [path, query = ''] = location.hash.slice(1).split('?');
-  const params = path === '/search' ? new URLSearchParams(query) : new URLSearchParams();
-  if (q) params.set('q', q); else params.delete('q');
-  params.delete('page');
-  const qs = params.toString();
-  location.hash = qs ? `#/search?${qs}` : '#/search';
-});
 
 // ---------- updates ----------
 

@@ -178,9 +178,9 @@ export async function viewHome(root) {
       data.sections.filter(sec => sec.shelves.length).map(sec => h('section', { class: 'shelf-section', id: `sec-${sec.id}` },
         h('h2', {}, sec.title),
         ...sec.shelves.map(sh => h('div', { class: 'shelf' },
-          h('div', { class: 'shelf-head' },
-            h('a', { href: `#/shelf/${sh.id}`, class: 'shelf-title' }, sh.title),
-            h('a', { href: `#/shelf/${sh.id}`, class: 'shelf-all' }, `все ${sh.total.toLocaleString('ru')} →`)),
+          h('a', { class: 'shelf-head', href: `#/shelf/${sh.id}` },
+            h('span', { class: 'shelf-title' }, sh.title),
+            h('span', { class: 'shelf-all' }, `все ${sh.total.toLocaleString('ru')} →`)),
           h('div', { class: 'shelf-row' }, sh.items.map(it => card(it))))))),
     );
   } catch (e) {
@@ -270,6 +270,23 @@ function readSearch(params) {
   };
 }
 
+/** API request of a search state (also used by the tag catalog for its live counts). */
+function searchRequest(st) {
+  const dev = st.dev || settings().platform || 'any';
+  return {
+    ...baseRequest(),
+    text: st.q || null,
+    must: st.must.map(String), want: st.want.map(String), exclude: st.exclude.map(String),
+    sort: st.sort,
+    platforms: st.plat.length ? st.plat : (PLATFORM_GROUPS[dev] || []),
+    length_min: st.lmin ? Number(st.lmin) : null, length_max: st.lmax ? Number(st.lmax) : null,
+    year_from: st.yfrom ? Number(st.yfrom) : null, year_to: st.yto ? Number(st.yto) : null,
+    min_votes: st.votes ? Number(st.votes) : null, min_rating: st.rating ? Number(st.rating) : null,
+    freeware: st.free ? true : null,
+    min_match: st.mm !== '' ? Number(st.mm) : null,
+  };
+}
+
 function writeSearch(st) {
   const p = new URLSearchParams();
   if (st.q) p.set('q', st.q);
@@ -317,9 +334,8 @@ export async function viewSearch(root, params) {
   };
   renderChips();
 
-  // the title is typed in the search field of the header (one field for the whole app)
-  const quick = document.getElementById('quickq');
-  if (quick) quick.value = st.q || '';
+  const text = h('input', { type: 'search', value: st.q, placeholder: 'Название', enterkeyhint: 'search', 'aria-label': 'Название' });
+  text.addEventListener('change', () => { st.q = text.value.trim(); go(); });
   const num = (k, ph, w = '6em') => {
     const i = h('input', { type: 'number', value: st[k], placeholder: ph, style: { width: w }, min: 0 });
     i.addEventListener('change', () => { st[k] = i.value; go(); });
@@ -351,8 +367,7 @@ export async function viewSearch(root, params) {
   root.append(
     h('div', { class: 'page-head' }, h('h1', {}, 'Поиск')),
     h('div', { class: 'panel search-panel' },
-      st.q ? h('p', { class: 'muted small' }, 'Название содержит: ', h('b', {}, st.q), ' ',
-        h('button', { class: 'linkish', type: 'button', onclick: () => { st.q = ''; go(); } }, '✕ убрать')) : null,
+      text,
       h('div', { class: 'dev-line' }, h('span', { class: 'muted small' }, 'Где играть:'), devSeg),
       tagPicker(tags, (t, mode) => {
         for (const k of ['must', 'want', 'exclude']) st[k] = st[k].filter(x => x !== t.id);
@@ -363,25 +378,14 @@ export async function viewSearch(root, params) {
       filters,
       h('div', { class: 'toolbar' },
         sortSelect(st.sort, v => { st.sort = v; go(); }),
-        h('a', { class: 'btn', href: '#/tags' }, '🏷️ Выбрать из каталога'),
+        h('a', { class: 'btn', href: `#/tags?${new URLSearchParams(writeSearch(st).split('?')[1] || '')}` }, '🏷️ Каталог тегов'),
         h('button', { class: 'btn', onclick: () => { location.hash = '#/search'; } }, 'Сбросить'))),
   );
   if (!st.must.length && !st.want.length && !st.exclude.length && !st.q && !st.plat.length && !st.free && !st.lmax && !st.lmin && !st.dev) {
-    root.append(h('p', { class: 'muted center' }, 'Добавьте теги или название — или выберите теги в каталоге.'));
+    root.append(h('p', { class: 'muted center' }, 'Введите название или добавьте теги — по одному или из «Каталога тегов».'));
     return;
   }
-  const req = {
-    ...baseRequest(),
-    text: st.q || null,
-    must: st.must.map(String), want: st.want.map(String), exclude: st.exclude.map(String),
-    sort: st.sort,
-    platforms: st.plat.length ? st.plat : (PLATFORM_GROUPS[dev] || []),
-    length_min: st.lmin ? Number(st.lmin) : null, length_max: st.lmax ? Number(st.lmax) : null,
-    year_from: st.yfrom ? Number(st.yfrom) : null, year_to: st.yto ? Number(st.yto) : null,
-    min_votes: st.votes ? Number(st.votes) : null, min_rating: st.rating ? Number(st.rating) : null,
-    freeware: st.free ? true : null,
-    min_match: st.mm !== '' ? Number(st.mm) : null,
-  };
+  const req = searchRequest(st);
   root.append(resultGrid(async offset => {
     const r = await api.search({ ...req, offset, limit: 48, tag_counts: offset === 0 });
     if (r.tag_counts) counts = r.tag_counts;
@@ -401,6 +405,7 @@ const MODE_NAME = { want: 'желательно', must: 'обязательно'
 let lastCounts = null;
 let lastTotal = null;
 let countsSeq = 0;
+let catalogCarry = new URLSearchParams(); // the search settings the catalog was opened with
 
 function paintCounts() {
   if (!lastCounts) return;
@@ -417,7 +422,9 @@ const refreshCounts = debounce(async bar => {
   const st = { must: [], exclude: [] };
   for (const [id, m] of picked) if (m !== 'want') st[m].push(String(id));
   try {
-    const r = await api.search({ ...baseRequest(), ...st, limit: 1, tag_counts: true });
+    // the search's title, platform and filters count too, so "will find N" matches the search
+    const base = searchRequest(readSearch(catalogCarry));
+    const r = await api.search({ ...base, ...st, want: [], min_match: null, limit: 1, tag_counts: true });
     if (seq !== countsSeq) return;
     lastCounts = r.tag_counts || {};
     lastTotal = r.total;
@@ -426,7 +433,16 @@ const refreshCounts = debounce(async bar => {
   } catch { /* counts are a nicety */ }
 }, 200);
 
-function pickBar() {
+/** Search URL from the catalog selection plus the search's other settings. */
+function searchFromPicked(carry) {
+  const p = new URLSearchParams(carry);
+  const st = { must: [], want: [], exclude: [] };
+  for (const [id, m] of picked) st[m].push(id);
+  for (const k of ['must', 'want', 'exclude']) if (st[k].length) p.set(k, st[k].join('|')); else p.delete(k);
+  return `#/search?${p}`;
+}
+
+function pickBar(carry = new URLSearchParams()) {
   const bar = h('div', { class: 'pickbar', hidden: true });
   const render = () => {
     const count = { want: 0, must: 0, exclude: 0 };
@@ -441,13 +457,7 @@ function pickBar() {
         document.querySelectorAll('.tchip[data-mode]').forEach(c => { c.removeAttribute('data-mode'); c.querySelector('.tchip-mode').textContent = ''; });
         render(); refreshCounts(bar);
       } }, 'Сбросить'),
-      h('button', { class: 'btn primary', type: 'button', onclick: () => {
-        const st = { must: [], want: [], exclude: [] };
-        for (const [id, m] of picked) st[m].push(id);
-        const p = new URLSearchParams();
-        for (const k of ['must', 'want', 'exclude']) if (st[k].length) p.set(k, st[k].join('|'));
-        location.hash = `#/search?${p}`;
-      } }, 'Найти →'));
+      h('button', { class: 'btn primary', type: 'button', onclick: () => { location.hash = searchFromPicked(carry); } }, 'Найти →'));
   };
   render();
   bar._render = render;
@@ -484,7 +494,22 @@ export async function viewTags(root, sub, params) {
   let tags;
   try { tags = await api.tags(); } catch (e) { mount(root, errorBox(e)); return; }
   const tab = sub[0] === 'all' ? 'all' : (sub[0] === 'adult' && adultOn() ? 'adult' : 'catalog');
-  const bar = pickBar();
+  // the catalog is the tag picker of the search: it starts from the search's tags and keeps its
+  // other settings (title, platform, filters), and "Find" goes back with everything together
+  const carry = new URLSearchParams(params);
+  if (['must', 'want', 'exclude'].some(k => params.has(k))) {
+    picked.clear();
+    for (const mode of ['must', 'want', 'exclude']) {
+      for (const ref of (params.get(mode) || '').split('|').filter(Boolean)) {
+        const t = tags.byId.get(Number(ref)) || tags.list.find(x => x.name.toLowerCase() === ref.toLowerCase());
+        if (t) picked.set(t.id, mode);
+      }
+    }
+  }
+  for (const k of ['must', 'want', 'exclude', 'f']) carry.delete(k);
+  const keep = carry.toString() ? `?${carry}` : '';
+  catalogCarry = carry;
+  const bar = pickBar(carry);
   const filter = h('input', { type: 'search', placeholder: 'Найти тег… (по-русски или по-английски)', value: params.get('f') || '' });
   const body = h('div', { class: 'tag-browser' });
   const notAdult = t => t.cat !== 'ero';
@@ -551,11 +576,11 @@ export async function viewTags(root, sub, params) {
   filter.addEventListener('input', debounce(render, 150));
 
   mount(root,
-    h('div', { class: 'page-head' }, h('h1', {}, 'Теги')),
+    h('div', { class: 'page-head' }, h('a', { class: 'back', href: searchFromPicked(carry) }, '← К поиску'), h('h1', {}, 'Каталог тегов')),
     h('div', { class: 'tabs' },
-      h('a', { href: '#/tags', class: tab === 'catalog' ? 'on' : '' }, 'Подборка'),
-      h('a', { href: '#/tags/all', class: tab === 'all' ? 'on' : '' }, 'Все теги VNDB'),
-      adultOn() ? h('a', { href: '#/tags/adult', class: tab === 'adult' ? 'on' : '' }, 'Для взрослых') : null),
+      h('a', { href: `#/tags${keep}`, class: tab === 'catalog' ? 'on' : '' }, 'Подборка'),
+      h('a', { href: `#/tags/all${keep}`, class: tab === 'all' ? 'on' : '' }, 'Все теги VNDB'),
+      adultOn() ? h('a', { href: `#/tags/adult${keep}`, class: tab === 'adult' ? 'on' : '' }, 'Для взрослых') : null),
     filter, body, bar);
   render();
   refreshCounts(bar);
