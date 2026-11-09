@@ -6,6 +6,7 @@ import { api } from './api.js';
 import { humanError } from './errors.js';
 import { viewProfile } from './profile.js';
 import { openFilters, closeFilters } from './filters.js';
+import { viewExtList, viewExtGame } from './external.js';
 import { viewHome, viewShelf, viewSearch, viewTags, viewTag, viewVn, viewMy, viewSettings } from './views.js';
 
 // One entry per place: the tag catalog is part of the search, the logo is not a second "home" button.
@@ -26,7 +27,7 @@ function highlightNav(path) {
   document.querySelectorAll('[data-href]').forEach(a => {
     const href = a.dataset.href;
     // search, tags and VN pages belong to "Главная"; settings to the profile
-    const on = href === '#/' ? ['#/', '#/shelf', '#/vn', '#/search', '#/tags', '#/tag'].includes(section)
+    const on = href === '#/' ? ['#/', '#/shelf', '#/vn', '#/search', '#/tags', '#/tag', '#/f95'].includes(section)
       : section.startsWith(href) || (href === '#/profile' && section === '#/settings');
     a.classList.toggle('on', on);
   });
@@ -63,6 +64,7 @@ async function route() {
     case 'my': return viewMy(target, parts[1]);
     case 'settings': return viewSettings(target);
     case 'profile': return viewProfile(target);
+    case 'f95': return parts[1] ? viewExtGame(target, parts[1]) : viewExtList(target, params);
     default: view.append(h('p', {}, 'Страница не найдена. ', h('a', { href: '#/' }, 'На главную')));
   }
 }
@@ -121,7 +123,7 @@ async function watchJob(doneText) {
     // the data changed: redraw the current page by itself instead of asking to reload
     api.resetTags();
     route();
-    const text = doneText || ({ import: '✅ База VNDB загружена.', sync: '✅ Новые новеллы и релизы добавлены.', sources: '✅ Каталоги переводов обновлены.' })[job.kind] || '✅ Готово.';
+    const text = doneText || ({ import: '✅ База VNDB загружена.', sync: '✅ Новые новеллы и релизы добавлены.', sources: '✅ Каталоги переводов обновлены.', external: '✅ Каталог F95Zone обновлён.' })[job.kind] || '✅ Готово.';
     showBanner(text);
     const shown = banner.textContent;
     setTimeout(() => { if (banner.textContent === shown) banner.hidden = true; }, 6000);

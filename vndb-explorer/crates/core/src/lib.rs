@@ -12,6 +12,7 @@ pub mod catalog;
 pub mod copy;
 pub mod db;
 pub mod detail;
+pub mod external;
 pub mod extlinks;
 pub mod http;
 pub mod import;

@@ -7,6 +7,7 @@ import {
 } from './ui.js';
 import { CURATED, ADULT, tagLabel, catRu, resolveGroup, hasRu } from './taxonomy.js';
 import { openLightbox } from './lightbox.js';
+import { extHomeSection, extSettings, extVnBlock, extOn } from './external.js';
 
 const SORTS = {
   relevance: 'По соответствию', votes: 'Популярные', rating: 'Рейтинг', newest: 'Новые', oldest: 'Старые',
@@ -182,6 +183,7 @@ export async function viewHome(root) {
             h('span', { class: 'shelf-title' }, sh.title),
             h('span', { class: 'shelf-all' }, `все ${sh.total.toLocaleString('ru')} →`)),
           h('div', { class: 'shelf-row' }, sh.items.map(it => card(it))))))),
+      extHomeSection(),
     );
   } catch (e) {
     mount(root, errorBox(e, () => viewHome(root)));
@@ -756,6 +758,7 @@ export async function viewVn(root, id, params = new URLSearchParams()) {
         h('span', { class: 'price', 'data-url': src.url }),
         src.release ? h('div', { class: 'muted small' }, src.release, src.platforms.length ? ` · ${src.platforms.map(p => PLATFORMS[p] || p).join(', ')}` : '') : null)), 4))),
     communityBlock(d),
+    extVnBlock(d),
     hasSteam ? h('div', { class: 'toolbar' }, h('button', { class: 'btn', onclick: async e => {
       e.target.disabled = true; priceOut.textContent = 'Узнаю цены…';
       try {
@@ -941,7 +944,9 @@ export async function viewVn(root, id, params = new URLSearchParams()) {
 }
 
 function communityBlock(d) {
-  const list = d.community || [];
+  // a game already found in an external catalog needs no search link to the same site
+  const found = new Set((d.external || []).map(x => x.source));
+  const list = (d.community || []).filter(l => l.direct || !found.has(l.source) || !extOn());
   if (!list.length) return null;
   const direct = list.filter(l => l.direct);
   const search = list.filter(l => !l.direct);
@@ -1099,6 +1104,7 @@ export async function viewSettings(root) {
       check('hideCancelled', 'Скрывать отменённые проекты'),
       field('Порядок языков вручную', text('langs', 'en, ru'), 'Коды через запятую: en, ru, uk, es, de… Первый — главный.'),
       h('h3', {}, 'Каталоги переводов и сообщества'), srcBox,
+      extSettings(),
       IN_APP ? null : field('Адрес сервера', text('apiBase', 'пусто = этот же сервер'), 'Нужно, только если интерфейс открыт не с того сервера, где база: например http://192.168.1.10:8080'),
       IN_APP ? null : h('p', { class: 'muted small' }, 'Чтобы открыть с телефона: запустите на ПК «vndb-web serve --addr 0.0.0.0:8080» и откройте http://IP-компьютера:8080 в браузере телефона.'),
       h('div', { class: 'toolbar' }, reset)),

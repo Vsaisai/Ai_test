@@ -20,6 +20,10 @@ use vndb_core::shelves::{self, Shelves};
 use vndb_core::sources::Sources;
 use vndb_core::Catalog;
 
+#[path = "external_api.rs"]
+mod external;
+pub use external::start_refresh as start_external_refresh;
+
 #[derive(RustEmbed)]
 #[folder = "../../web/"]
 struct Assets;
@@ -171,6 +175,8 @@ pub struct AppState {
     /// Cached result of the last update check: (when, value)
     pub updates: Mutex<Option<(std::time::Instant, Value)>>,
     pub http: reqwest::Client,
+    /// VNDB match index for external games: (catalog imported_at, index)
+    pub ext_index: Mutex<Option<(String, Arc<vndb_core::external::matching::Index>)>>,
 }
 
 /// Open the personal database; a damaged file is kept as `user.sqlite.broken-<time>` and a new
@@ -271,6 +277,7 @@ impl AppState {
                 .user_agent(vndb_core::http::user_agent())
                 .timeout(std::time::Duration::from_secs(30))
                 .build()?,
+            ext_index: Mutex::new(None),
             data_dir,
         })
     }
@@ -390,6 +397,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/vn/:id", get(vn_detail))
         .route("/api/vn/:id/prices", get(vn_prices))
         .route("/api/random", post(random))
+        .route("/api/ext/status", get(external::status))
+        .route("/api/ext/refresh", post(external::refresh))
+        .route("/api/ext/search", post(external::search))
+        .route("/api/ext/tags", get(external::tags))
+        .route("/api/ext/game/:source/:id", get(external::game))
         .route("/api/my", get(my_list))
         .route("/api/profile", get(profile).put(save_profile))
         .route("/api/my/:id", put(set_mark).delete(delete_mark))
@@ -1021,6 +1033,7 @@ async fn vn_detail(
         .ok();
     v["mark"] = json!(mark.as_ref().map(|m| &m.0));
     v["note"] = json!(mark.and_then(|m| m.1));
+    v["external"] = external::for_vn(&s, vid);
     if let Some(vn) = s.cat()?.get(vid) {
         let defs = s.sources.read().unwrap_or_else(PoisonError::into_inner);
         let order: Vec<String> = v["langs"]

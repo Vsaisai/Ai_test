@@ -55,6 +55,11 @@ export const api = {
     }
   },
   sync: () => call('POST', '/api/sync', {}),
+  extStatus: () => call('GET', '/api/ext/status'),
+  extRefresh: (full = false) => call('POST', '/api/ext/refresh', { source: 'f95zone', full }),
+  extSearch: q => call('POST', '/api/ext/search', { source: 'f95zone', ...q }),
+  extTags: () => call('GET', '/api/ext/tags?source=f95zone'),
+  extGame: (id, refresh = false) => call('GET', `/api/ext/game/f95zone/${encodeURIComponent(id)}${refresh ? '?refresh=1' : ''}`),
   sources: () => call('GET', '/api/sources'),
   refreshSources: () => call('POST', '/api/sources/refresh', {}),
   tags() {

@@ -170,7 +170,7 @@ export function debounce(fn, ms = 250) {
 
 // ---------- job progress (download / import / sync) ----------
 
-const JOB_TITLES = { import: 'Загрузка базы VNDB', sync: 'Новые новеллы и релизы', sources: 'Индексы каталогов' };
+const JOB_TITLES = { import: 'Загрузка базы VNDB', sync: 'Новые новеллы и релизы', sources: 'Индексы каталогов', external: 'Каталог F95Zone' };
 let detailsOpen = false;
 
 /** Compact progress line: "42% text" and a bar (null percent = unknown size, running stripe). */
