@@ -137,7 +137,7 @@ fn progress_view(kind: &str, p: &vndb_core::progress::Progress, tr: &mut Track) 
         parts.push(if p.unit == "bytes" {
             format!("{} МБ/с", fmt_mb(tr.speed))
         } else {
-            format!("{:.0} в сек.", tr.speed)
+            items_speed(tr.speed)
         });
     }
     if let Some(e) = eta {
@@ -233,6 +233,15 @@ pub fn prune_image_cache(dir: &std::path::Path, max: u64) {
         }
     }
     eprintln!("Image cache trimmed to {} MB", total / 1_048_576);
+}
+
+/// "12 в сек." or, for slow jobs (one page every few seconds), "3 с на шт.".
+fn items_speed(per_sec: f64) -> String {
+    if per_sec >= 1.0 {
+        format!("{per_sec:.0} в сек.")
+    } else {
+        format!("{:.0} с на шт.", (1.0 / per_sec).max(1.0))
+    }
 }
 
 /// Image cache limit (covers, screenshots, tag examples).
