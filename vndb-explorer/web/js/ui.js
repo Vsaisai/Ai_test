@@ -215,14 +215,16 @@ export function jobPanel(job, { compact = false, link = null } = {}) {
   const rows = p ? [
     ['Этап', `${p.step} из ${p.steps}: ${p.label}`],
     ['Выполнено', `${amount(p)}${p.stage_percent !== null && p.stage_percent !== undefined ? ` (${p.stage_percent.toFixed(1).replace('.', ',')}%)` : ''}`],
-    ['Скорость', p.speed > 0 ? (p.unit === 'bytes' ? `${(p.speed / 1048576).toFixed(1).replace('.', ',')} МБ/с` : `${p.speed.toFixed(0)} в сек.`) : '—'],
+    ['Скорость', p.speed > 0 ? (p.unit === 'bytes' ? `${(p.speed / 1048576).toFixed(1).replace('.', ',')} МБ/с` : (p.speed >= 1 ? `${p.speed.toFixed(0)} в сек.` : `${Math.max(1, Math.round(1 / p.speed))} с на шт.`)) : '—'],
     ['Осталось (этап)', p.eta || '—'],
     ['Прошло всего', p.elapsed],
   ] : [];
   const details = h('details', { class: 'job-details', open: detailsOpen, ontoggle: e => { detailsOpen = e.target.open; } },
     h('summary', {}, 'Подробнее'),
     h('dl', { class: 'meta' }, rows.flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, v)])),
-    h('pre', { class: 'log' }, (job.log || []).slice(-8).join('\n')));
+    // newest line at the bottom and always in view: the box is redrawn every second, and a
+    // column-reverse box starts scrolled to its end (older lines are above, by scrolling up)
+    h('div', { class: 'log' }, (job.log || []).slice(-40).reverse().map(l => h('div', {}, l))));
   return h('div', { class: 'job' },
     h('div', { class: 'job-head' }, h('span', { class: 'job-pct' }, `${Math.floor(overall)}%`), h('b', {}, title)),
     bar(overall, 'big'),

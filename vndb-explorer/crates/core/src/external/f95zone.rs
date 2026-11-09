@@ -23,7 +23,45 @@ use std::time::{Duration, Instant};
 
 pub const ID: &str = "f95zone";
 pub const HOST: &str = "https://f95zone.to";
-pub const MIN_GAP: Duration = Duration::from_secs(2);
+pub const MIN_GAP: Duration = Duration::from_secs(3);
+/// Pause after "too many requests" when the site does not say how long.
+pub const DEFAULT_COOLDOWN: u64 = 15 * 60;
+
+/// Until when the site asked for a pause (shared by the whole app: jobs and opened pages).
+static COOLDOWN_UNTIL: std::sync::Mutex<Option<std::time::SystemTime>> =
+    std::sync::Mutex::new(None);
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Seconds left of the pause the site asked for (None = no pause).
+pub fn cooldown_left() -> Option<u64> {
+    let until = (*COOLDOWN_UNTIL.lock().unwrap_or_else(|e| e.into_inner()))?;
+    until
+        .duration_since(std::time::SystemTime::now())
+        .ok()
+        .map(|d| d.as_secs().max(1))
+}
+
+/// Remember a pause until `until_unix` (from the saved state after a restart).
+pub fn set_cooldown_until(until_unix: u64) {
+    if until_unix > unix_now() {
+        let t = std::time::UNIX_EPOCH + Duration::from_secs(until_unix);
+        let mut c = COOLDOWN_UNTIL.lock().unwrap_or_else(|e| e.into_inner());
+        if c.is_none_or(|old| old < t) {
+            *c = Some(t);
+        }
+    }
+}
+
+/// When the current pause ends (unix seconds), for saving.
+pub fn cooldown_until_unix() -> Option<u64> {
+    cooldown_left().map(|l| unix_now() + l)
+}
 pub const PER_PAGE: u32 = 90;
 /// Longest description kept (the overview of a game is normally far shorter).
 pub const DESCRIPTION_MAX: usize = 20_000;
@@ -104,6 +142,10 @@ impl F95Zone {
     }
 
     fn get(&mut self, url: &str) -> Result<String, ProviderError> {
+        // the site asked for a pause: no request until it ends
+        if let Some(left) = cooldown_left() {
+            return Err(ProviderError::RateLimited { wait_secs: left });
+        }
         // one pace for the whole process: the import job and pages opened by the user share it
         {
             let mut last = LAST_REQUEST.lock().unwrap_or_else(|e| e.into_inner());
@@ -118,9 +160,24 @@ impl F95Zone {
         let res = self.client()?.get(url).send();
         let res = res.map_err(|e| ProviderError::Unavailable(e.to_string()))?;
         let status = res.status().as_u16();
-        let body = res.text().unwrap_or_default();
-        check_response(status, &body)?;
-        Ok(body)
+        // Retry-After in seconds, when the site says how long to wait
+        let retry_after = res
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<u64>().ok());
+        // a connection cut while the body is read is a temporary failure, not an empty page
+        let body = res
+            .text()
+            .map_err(|e| ProviderError::Unavailable(format!("ответ оборвался: {e}")))?;
+        match check_response(status, &body) {
+            Err(ProviderError::RateLimited { wait_secs }) => {
+                let wait = retry_after.unwrap_or(wait_secs).clamp(60, 3 * 3600);
+                set_cooldown_until(unix_now() + wait);
+                Err(ProviderError::RateLimited { wait_secs: wait })
+            }
+            other => other.map(|_| body),
+        }
     }
 
     /// Read the live tag and prefix dictionaries from the "Latest updates" page.
@@ -168,7 +225,30 @@ impl Provider for F95Zone {
     fn list(&mut self, page: u32) -> Result<ListPage, ProviderError> {
         let url = Self::list_url(page).replacen(HOST, &self.base, 1);
         let body = self.get(&url)?;
+        let t = body.trim_start();
+        if t.is_empty() {
+            return Err(ProviderError::Unavailable("пустой ответ".into()));
+        }
+        if t.starts_with('<') {
+            // an HTML page instead of the feed (maintenance, error page): temporary
+            return Err(ProviderError::Unavailable(
+                "вместо данных пришла страница сайта".into(),
+            ));
+        }
         parse_list(&body, &self.tags, &self.prefixes)
+    }
+
+    fn respect_cooldown(&mut self, until_unix: u64) {
+        set_cooldown_until(until_unix);
+    }
+
+    fn cooldown_until(&self) -> Option<u64> {
+        cooldown_until_unix()
+    }
+
+    fn slow_down(&mut self) {
+        // twice as polite after a bad answer, up to one request in 8 seconds
+        self.min_gap = (self.min_gap * 2).min(Duration::from_secs(8));
     }
 
     fn index_page(&mut self, page: u32) -> Result<super::IndexPage, ProviderError> {
@@ -195,7 +275,9 @@ pub fn check_response(status: u16, body: &str) -> Result<(), ProviderError> {
         || has("<title>429 Too Many Requests</title>")
         || has("temporarily blocked because of a large amount of requests")
     {
-        return Err(ProviderError::Blocked("слишком много запросов".into()));
+        return Err(ProviderError::RateLimited {
+            wait_secs: DEFAULT_COOLDOWN,
+        });
     }
     if has("_cf_chl_opt")
         || has("<title>Just a moment...</title>")
@@ -329,7 +411,10 @@ pub fn parse_list(
     if v.get("status").and_then(Value::as_str) != Some("ok") {
         let msg = v.get("msg").map(|m| m.to_string()).unwrap_or_default();
         if msg.contains("temporarily blocked") {
-            return Err(ProviderError::Blocked("слишком много запросов".into()));
+            set_cooldown_until(unix_now() + DEFAULT_COOLDOWN);
+            return Err(ProviderError::RateLimited {
+                wait_secs: DEFAULT_COOLDOWN,
+            });
         }
         return Err(ProviderError::Parse(format!("ошибка ленты: {msg}")));
     }
@@ -423,7 +508,7 @@ pub struct CheckStep {
     pub details: Vec<String>,
 }
 
-/// A short, polite test against the real site: about 4 + `games` requests, 2 s apart.
+/// A short, polite test against the real site: about 4 + `games` requests, 3 s apart.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct LiveCheck {
     pub steps: Vec<CheckStep>,
@@ -447,6 +532,14 @@ pub fn live_check(
     log: &dyn Fn(&str),
 ) -> anyhow::Result<LiveCheck> {
     let mut p = F95Zone::new();
+    super::load_cooldown(&mut p, conn)?;
+    if let Some(left) = cooldown_left() {
+        log(&format!(
+            "Сайт просил паузу: проверка подождёт ещё {} мин",
+            left.div_ceil(60)
+        ));
+        std::thread::sleep(Duration::from_secs(left));
+    }
     let mut out = LiveCheck {
         at: super::store::stamp(),
         ..Default::default()
@@ -464,7 +557,7 @@ pub fn live_check(
         });
     };
     let stop = |out: &mut LiveCheck, e: &ProviderError| -> bool {
-        if let ProviderError::Blocked(_) = e {
+        if let ProviderError::Blocked(_) | ProviderError::RateLimited { .. } = e {
             out.stopped = Some(e.to_string());
             return true;
         }
@@ -724,6 +817,9 @@ pub fn live_check(
 }
 
 fn finish(conn: &rusqlite::Connection, mut out: LiveCheck) -> anyhow::Result<LiveCheck> {
+    if let Some(t) = cooldown_until_unix() {
+        super::store::set_meta(conn, ID, "cooldown_until", &t.to_string())?;
+    }
     out.ok = out.stopped.is_none() && !out.steps.is_empty() && out.steps.iter().all(|s| s.ok);
     super::store::set_meta(conn, ID, "last_check", &serde_json::to_string(&out)?)?;
     Ok(out)
@@ -1235,7 +1331,7 @@ mod tests {
         let blocked = r#"{"status":"error","msg":"You have been temporarily blocked because of a large amount of requests, please try again later"}"#;
         assert!(matches!(
             parse_list(blocked, &HashMap::new(), &HashMap::new()),
-            Err(ProviderError::Blocked(_))
+            Err(ProviderError::RateLimited { .. })
         ));
         assert!(matches!(
             check_response(200, "<html><title>Just a moment...</title>"),
@@ -1243,7 +1339,7 @@ mod tests {
         ));
         assert!(matches!(
             check_response(429, ""),
-            Err(ProviderError::Blocked(_))
+            Err(ProviderError::RateLimited { .. })
         ));
         assert!(matches!(
             check_response(403, ""),

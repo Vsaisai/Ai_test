@@ -103,7 +103,8 @@ main { max-width: 1400px; margin: 0 auto; padding: 12px 16px 24px; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .error { background: color-mix(in srgb, var(--exclude) 12%, var(--panel)); border: 1px solid var(--exclude); padding: 12px 16px; border-radius: var(--radius); }
 .warn { color: var(--exclude); font-size: .85em; }
-.log { background: var(--panel-2); padding: 10px; border-radius: 8px; max-height: 220px; overflow: auto; font-size: 12px; white-space: pre-wrap; }
+.log { background: var(--panel-2); padding: 10px; border-radius: 8px; max-height: 220px; overflow: auto; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; display: flex; flex-direction: column-reverse; }
+.log > div + div { margin-bottom: 2px; }
 .toast {
   position: fixed; left: 50%; bottom: calc(80px + env(safe-area-inset-bottom)); transform: translateX(-50%) translateY(20px);
   background: var(--text); color: var(--bg); padding: 8px 16px; border-radius: 20px; opacity: 0; pointer-events: none; transition: .2s; z-index: 50;

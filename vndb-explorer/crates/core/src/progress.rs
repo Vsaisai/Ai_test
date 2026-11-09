@@ -70,6 +70,10 @@ pub fn stage_label(stage: &str) -> &'static str {
         "sync_rel" => "Новые релизы",
         "sync_save" => "Сохранение",
         "sources" => "Индексы каталогов",
+        "external" => "Лента F95Zone, страницы",
+        "external-audit" => "Список тем форума, страницы",
+        "external-check" => "Проверка F95Zone",
+        "matching" => "Совпадения с VNDB",
         _ => "Обработка",
     }
 }
@@ -86,6 +90,8 @@ pub fn stage_weight(stage: &str) -> f64 {
         "sync_vn" => 30.0,
         "sync_rel" => 60.0,
         "sync_save" => 9.0,
+        "external" | "external-audit" => 95.0,
+        "matching" => 5.0,
         _ => 1.0,
     }
 }
@@ -97,6 +103,9 @@ pub fn stages_of(kind: &str) -> &'static [&'static str] {
             "download", "read", "tags", "links", "indexes", "derived", "compact", "load",
         ],
         "sync" => &["sync_vn", "sync_rel", "sync_save", "load"],
+        "external" => &["external", "matching"],
+        "external-audit" => &["external-audit", "matching"],
+        "external-check" => &["external-check"],
         _ => &["sources"],
     }
 }

@@ -59,6 +59,12 @@ pub async fn status(State(s): St) -> ApiResult<Value> {
         let mut v = json!({});
         for src in SOURCES {
             v[*src] = json!(store::stats(&conn, src)?);
+            if let Some(t) =
+                store::get_meta(&conn, src, "cooldown_until")?.and_then(|t| t.parse::<u64>().ok())
+            {
+                f95zone::set_cooldown_until(t);
+            }
+            v[*src]["cooldown_left"] = json!(f95zone::cooldown_left());
             v[*src]["last_check"] = store::get_meta(&conn, src, "last_check")?
                 .and_then(|c| serde_json::from_str::<Value>(&c).ok())
                 .unwrap_or(Value::Null);
@@ -124,6 +130,16 @@ pub fn start_refresh(state: Arc<AppState>, source: &str, full: bool) -> bool {
             // only a safety limit: the feed's own page count decides
             5000,
             &|m: &str| log.log(m),
+            &|done, total| {
+                log.progress(vndb_core::progress::Progress {
+                    stage: "external",
+                    step: 1,
+                    steps: 2,
+                    done,
+                    total,
+                    unit: "items",
+                })
+            },
         )?;
         log.log(&format!(
             "Найдено релизов: {}, новых: {}, обновлённых: {}, без изменений: {}, скрыто правилами: {}, ошибок: {}, повторов: {}",
@@ -160,7 +176,23 @@ pub async fn audit(State(s): St, Json(req): Json<AuditReq>) -> ApiResult<Value> 
         let conn = db(st)?;
         log.stage("external-audit", 1, 2);
         let mut p = provider(&source)?;
-        let rep = ext::audit(p.as_mut(), &conn, 20_000, limit, &|m: &str| log.log(m))?;
+        let rep = ext::audit(
+            p.as_mut(),
+            &conn,
+            20_000,
+            limit,
+            &|m: &str| log.log(m),
+            &|done, total| {
+                log.progress(vndb_core::progress::Progress {
+                    stage: "external-audit",
+                    step: 1,
+                    steps: 2,
+                    done,
+                    total,
+                    unit: "items",
+                })
+            },
+        )?;
         log.log(&format!(
             "Тем в форуме: {}, уже были в каталоге: {}, не было в ленте: {}, проверено страниц: {}, ошибок: {}",
             rep.index_threads, rep.already_in_catalog, rep.missing_added, rep.checked, rep.errors
@@ -326,6 +358,8 @@ pub async fn game(
         let mut details_error = None;
         if stale || q.refresh.as_deref() == Some("1") {
             let mut p = F95Zone::new();
+            // a pause the site asked for also holds for pages the user opens
+            ext::load_cooldown(&mut p, &conn)?;
             match p.details(&id) {
                 Ok(g) => {
                     store::save_details(&conn, &g)?;
