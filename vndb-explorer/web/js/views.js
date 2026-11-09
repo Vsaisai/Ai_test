@@ -1053,10 +1053,71 @@ export async function viewMy(root, status) {
         ? [h('div', { class: 'toolbar' }, sortSel),
           resultGrid(offset => api.search({ ...baseRequest(), lang_mode: 'any', ero: 'show', ids, sort, offset, limit: 48 }))]
         : h('p', { class: 'muted center' }, 'Здесь пусто. Откройте любую новеллу и нажмите «Хочу», «Читаю» и т.д.'),
+      shelvesFileBox(() => viewMy(root, status)),
     );
   } catch (e) {
     mount(root, errorBox(e));
   }
+}
+
+/** Save the shelves to a file / load them back (another device, a backup). */
+function shelvesFileBox(reload) {
+  const out = h('div', {});
+  const native = window.VNShelfNative;
+  const save = async () => {
+    if (native && native.saveFile) {
+      try {
+        const data = await api.myExport();
+        window.VNShelfFileSaved = ok => toast(ok ? 'Полки сохранены в файл' : 'Файл не сохранён');
+        native.saveFile('vnshelf-shelves.json', JSON.stringify(data, null, 2));
+      } catch (e) { toast(e.message); }
+      return;
+    }
+    const a = h('a', { href: api.myExportUrl(), download: 'vnshelf-shelves.json' });
+    document.body.append(a); a.click(); a.remove();
+  };
+  const offer = text => {
+    let data;
+    try { data = JSON.parse(text); } catch { data = null; }
+    if (!data || data.format !== 'vnshelf-shelves' || !Array.isArray(data.marks)) {
+      out.replaceChildren(h('p', { class: 'error small' }, 'Это не файл полок VN Shelf.'));
+      return;
+    }
+    const run = async replace => {
+      try {
+        const r = await api.myImport(data, replace);
+        toast(`Добавлено: ${r.added}, обновлено: ${r.updated}${r.skipped ? `, без изменений: ${r.skipped}` : ''}`);
+        reload();
+      } catch (e) { out.replaceChildren(errorBox(e)); }
+    };
+    out.replaceChildren(h('div', { class: 'panel' },
+      h('p', {}, `В файле отметок: ${data.marks.length}.`),
+      h('div', { class: 'toolbar' },
+        h('button', { class: 'btn primary', onclick: () => run(false) }, 'Объединить с моими'),
+        h('button', { class: 'btn', onclick: () => { if (confirm('Текущие полки будут заменены содержимым файла. Продолжить?')) run(true); } }, 'Заменить мои полки'),
+        h('button', { class: 'btn', onclick: () => out.replaceChildren() }, 'Отмена')),
+      h('p', { class: 'muted small' }, 'При объединении из двух отметок одной новеллы остаётся более новая.')));
+  };
+  const load = () => {
+    if (native && native.openFile) {
+      window.VNShelfFileOpened = text => { if (text) offer(text); };
+      native.openFile();
+      return;
+    }
+    const input = h('input', { type: 'file', accept: '.json,application/json', hidden: true, onchange: async e => {
+      const f = e.target.files[0];
+      input.remove();
+      if (f) offer(await f.text());
+    } });
+    document.body.append(input); input.click();
+  };
+  return h('details', { class: 'panel form shelves-file' },
+    h('summary', {}, h('h2', {}, 'Перенос и резервная копия')),
+    h('p', { class: 'muted small' }, 'Сохраните полки в файл, чтобы перенести их на другое устройство или не потерять при переустановке.'),
+    h('div', { class: 'toolbar' },
+      h('button', { class: 'btn', onclick: save }, 'Сохранить в файл'),
+      h('button', { class: 'btn', onclick: load }, 'Загрузить из файла')),
+    out);
 }
 
 // ---------- settings ----------

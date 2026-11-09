@@ -404,6 +404,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/ext/tags", get(external::tags))
         .route("/api/ext/game/:source/:id", get(external::game))
         .route("/api/my", get(my_list))
+        .route("/api/my/export", get(my_export))
+        .route("/api/my/import", post(my_import))
         .route("/api/profile", get(profile).put(save_profile))
         .route("/api/my/:id", put(set_mark).delete(delete_mark))
         .route("/img/*path", get(image))
@@ -1304,6 +1306,128 @@ async fn set_mark(
         )
         .map_err(anyhow::Error::from)?;
     Ok(Json(json!({ "ok": true })))
+}
+
+/// The personal shelves as a file (to move them to another device or keep a copy).
+async fn my_export(State(s): St) -> Result<Response, ApiError> {
+    let (marks, name) = {
+        let u = s.user.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut st = u
+            .prepare("SELECT vid, status, note, updated FROM marks ORDER BY updated DESC")
+            .map_err(anyhow::Error::from)?;
+        let marks: Vec<Value> = st
+            .query_map([], |r| {
+                Ok(json!({ "id": format!("v{}", r.get::<_, u32>(0)?), "status": r.get::<_, String>(1)?,
+                           "note": r.get::<_, Option<String>>(2)?, "updated": r.get::<_, Option<String>>(3)? }))
+            })
+            .map_err(anyhow::Error::from)?
+            .filter_map(Result::ok)
+            .collect();
+        (marks, user_setting(&u, "profile_name"))
+    };
+    let body = json!({
+        "format": "vnshelf-shelves", "format_version": 1, "app_version": vndb_core::app_version(),
+        "profile": { "name": name }, "marks": marks,
+    });
+    let text = serde_json::to_string_pretty(&body).map_err(anyhow::Error::from)?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/json; charset=utf-8"),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"vnshelf-shelves.json\"",
+            ),
+        ],
+        text,
+    )
+        .into_response())
+}
+
+#[derive(Deserialize)]
+struct ImportMark {
+    id: String,
+    status: String,
+    note: Option<String>,
+    updated: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct MyImport {
+    format: Option<String>,
+    marks: Vec<ImportMark>,
+    /// true: the file replaces the shelves; false: merge (the newer mark of a novel wins)
+    #[serde(default)]
+    replace: bool,
+}
+
+async fn my_import(State(s): St, Json(req): Json<MyImport>) -> ApiResult<Value> {
+    if req
+        .format
+        .as_deref()
+        .is_some_and(|f| f != "vnshelf-shelves")
+    {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "это не файл полок VN Shelf".into(),
+        ));
+    }
+    if req.marks.len() > 100_000 {
+        return Err(ApiError(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "too many marks".into(),
+        ));
+    }
+    let mut u = s.user.lock().unwrap_or_else(PoisonError::into_inner);
+    let tx = u.transaction().map_err(anyhow::Error::from)?;
+    if req.replace {
+        tx.execute("DELETE FROM marks", [])
+            .map_err(anyhow::Error::from)?;
+    }
+    let (mut added, mut updated, mut skipped) = (0, 0, 0);
+    for m in &req.marks {
+        let Ok(vid) = parse_vid(&m.id) else {
+            skipped += 1;
+            continue;
+        };
+        if !STATUSES.contains(&m.status.as_str()) {
+            skipped += 1;
+            continue;
+        }
+        let when = m
+            .updated
+            .clone()
+            .filter(|t| t.len() >= 10 && t.len() <= 32)
+            .unwrap_or_else(|| "1970-01-01 00:00:00".into());
+        let existing: Option<String> = tx
+            .query_row("SELECT updated FROM marks WHERE vid = ?1", [vid], |r| {
+                r.get(0)
+            })
+            .ok();
+        match existing {
+            // keep the newer of the two
+            Some(cur) if cur >= when => skipped += 1,
+            Some(_) => {
+                tx.execute(
+                    "UPDATE marks SET status = ?2, note = ?3, updated = ?4 WHERE vid = ?1",
+                    rusqlite::params![vid, m.status, m.note, when],
+                )
+                .map_err(anyhow::Error::from)?;
+                updated += 1;
+            }
+            None => {
+                tx.execute(
+                    "INSERT INTO marks(vid, status, note, updated) VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![vid, m.status, m.note, when],
+                )
+                .map_err(anyhow::Error::from)?;
+                added += 1;
+            }
+        }
+    }
+    tx.commit().map_err(anyhow::Error::from)?;
+    Ok(Json(
+        json!({ "added": added, "updated": updated, "skipped": skipped }),
+    ))
 }
 
 async fn delete_mark(State(s): St, Path(id): Path<String>) -> ApiResult<Value> {
