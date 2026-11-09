@@ -836,7 +836,12 @@ pub fn html_unescape(s: &str) -> String {
     while let Some(i) = rest.find('&') {
         out.push_str(&rest[..i]);
         rest = &rest[i..];
-        let end = rest[..rest.len().min(12)].find(';');
+        // look for ';' among the first 12 bytes, never cutting a multi-byte character
+        let mut win = rest.len().min(12);
+        while !rest.is_char_boundary(win) {
+            win -= 1;
+        }
+        let end = rest[..win].find(';');
         let Some(end) = end else {
             out.push('&');
             rest = &rest[1..];
@@ -894,7 +899,8 @@ pub fn html_text(html: &str) -> String {
         // drop script / style contents
         if !rest[i + 1..].starts_with('/') && (name == "script" || name == "style") {
             let close = format!("</{name}");
-            rest = match rest[i..].to_lowercase().find(&close) {
+            // ASCII lower case keeps byte positions (full lower case can change them)
+            rest = match rest[i..].to_ascii_lowercase().find(&close) {
                 Some(k) => &rest[i + k..],
                 None => "",
             };
@@ -939,11 +945,14 @@ fn field(text: &str, names: &[&str]) -> Option<String> {
     for line in text.lines() {
         let l = line.trim();
         for n in names {
-            if l.len() > n.len()
-                && l[..n.len()].eq_ignore_ascii_case(n)
-                && l[n.len()..].trim_start().starts_with(':')
+            let (Some(head), Some(tail)) = (l.get(..n.len()), l.get(n.len()..)) else {
+                continue;
+            };
+            if !tail.is_empty()
+                && head.eq_ignore_ascii_case(n)
+                && tail.trim_start().starts_with(':')
             {
-                let v = l[n.len()..].trim_start()[1..].trim();
+                let v = tail.trim_start()[1..].trim();
                 if !v.is_empty() {
                     return Some(v.to_string());
                 }
@@ -955,7 +964,7 @@ fn field(text: &str, names: &[&str]) -> Option<String> {
 
 /// Free text after "Overview:" up to the next `Header:` line.
 fn overview(text: &str) -> Option<String> {
-    let lower = text.to_lowercase();
+    let lower = text.to_ascii_lowercase();
     let i = ["overview", "story", "synopsis", "description"]
         .iter()
         .filter_map(|k| {
@@ -1207,7 +1216,7 @@ pub fn parse_thread(html: &str, id: &str) -> Result<ExtGame, ProviderError> {
         .map(|e| post_start + e)
         .unwrap_or(html.len());
     let post = &html[post_start..post_end];
-    let cut = download_section(&post.to_lowercase());
+    let cut = download_section(&post.to_ascii_lowercase());
     let head = &post[..cut];
     let text = html_text(head);
     let mut links: Vec<OfficialLink> = Vec::new();
@@ -1243,13 +1252,16 @@ pub fn parse_thread(html: &str, id: &str) -> Result<ExtGame, ProviderError> {
     let updated = field(&text, &["Thread Updated", "Updated", "Release Date"]).and_then(|d| {
         let d = d.replace('/', "-");
         let ok = d.len() >= 10
-            && d[..10].chars().enumerate().all(|(i, c)| {
-                if i == 4 || i == 7 {
-                    c == '-'
-                } else {
-                    c.is_ascii_digit()
-                }
+            && d.get(..10).is_some_and(|h| {
+                h.chars().enumerate().all(|(i, c)| {
+                    if i == 4 || i == 7 {
+                        c == '-'
+                    } else {
+                        c.is_ascii_digit()
+                    }
+                })
             });
+        // 10 ASCII characters were checked above, so this cut is safe
         ok.then(|| d[..10].to_string())
     });
     let cover = attr_values(head, "data-src")
@@ -1480,6 +1492,40 @@ mod tests {
         let d = g.description.unwrap();
         assert!(d.chars().count() > 10_000, "{}", d.len());
         assert!(d.ends_with("story."));
+    }
+
+    #[test]
+    fn multibyte_text_never_breaks_parsing() {
+        // the exact crash from a real page: '&' then an en dash right at byte 12
+        assert_eq!(html_unescape("& 123456789–x"), "& 123456789–x");
+        assert_eq!(html_unescape("&ampx–y; z"), "&ampx–y; z");
+        assert_eq!(field("Release Dat–e: 2020", &["Release Date"]), None);
+        assert_eq!(
+            field("Release Date: 2025–11-01", &["Release Date"]).as_deref(),
+            Some("2025–11-01")
+        );
+        // characters of 2, 3 and 4 bytes, and one whose lower case is longer than itself
+        for ch in ["–", "İ", "😀", "é"] {
+            for (name, page) in [("thread", THREAD), ("forum", FORUM)] {
+                let mut at = 0;
+                while at <= page.len() {
+                    if page.is_char_boundary(at) {
+                        let mut t = String::with_capacity(page.len() + 4);
+                        t.push_str(&page[..at]);
+                        t.push_str(ch);
+                        t.push_str(&page[at..]);
+                        let r = std::panic::catch_unwind(|| {
+                            let _ = parse_thread(&t, "1");
+                            let _ = parse_forum_page(&t);
+                            let _ = html_text(&t);
+                            let _ = html_unescape(&t);
+                        });
+                        assert!(r.is_ok(), "{name}: {ch:?} at byte {at}");
+                    }
+                    at += 1;
+                }
+            }
+        }
     }
 
     #[test]
