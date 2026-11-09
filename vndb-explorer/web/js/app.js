@@ -2,6 +2,7 @@
 import { applyTheme, settings, save, IN_APP, APP_VERSION, RELEASES_PAGE } from './store.js';
 import { h, jobPanel, progressLine } from './ui.js';
 import { installTagTips } from './tagtip.js';
+import { installQuickMark } from './quickmark.js';
 import { api } from './api.js';
 import { humanError } from './errors.js';
 import { viewProfile } from './profile.js';
@@ -289,6 +290,7 @@ addEventListener('resize', () => document.documentElement.classList.toggle('touc
 applyTheme();
 buildNav();
 installTagTips();
+installQuickMark();
 window.addEventListener('hashchange', route);
 route();
 setTimeout(() => checkUpdates(), 1500);

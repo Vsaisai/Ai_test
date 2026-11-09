@@ -156,10 +156,10 @@ export async function viewExtList(root, params) {
       }
       grid.replaceChildren(...r.items.map(extCard));
       const pages = Math.ceil(r.total / r.per_page);
-      pager.replaceChildren(
+      mount(pager, pages > 1 ? [
         st.page > 1 ? h('button', { class: 'btn', onclick: () => { st.page--; load(); window.scrollTo(0, 0); } }, '← Назад') : null,
         h('span', { class: 'muted small' }, ` ${st.page} из ${pages} `),
-        st.page < pages ? h('button', { class: 'btn', onclick: () => { st.page++; load(); window.scrollTo(0, 0); } }, 'Дальше →') : null);
+        st.page < pages ? h('button', { class: 'btn', onclick: () => { st.page++; load(); window.scrollTo(0, 0); } }, 'Дальше →') : null] : null);
     } catch (e) {
       grid.replaceChildren(errorBox(e, load));
     }

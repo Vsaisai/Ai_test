@@ -94,5 +94,6 @@ export const api = {
   profile: () => call('GET', '/api/profile'),
   saveProfile: p => call('PUT', '/api/profile', p),
   mark: (id, status, note) => call('PUT', `/api/my/${id}`, { status, note }),
+  quickMark: (id, status) => call('PUT', `/api/my/${id}`, { status, keep_note: true }),
   unmark: id => call('DELETE', `/api/my/${id}`),
 };

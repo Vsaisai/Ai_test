@@ -1282,6 +1282,9 @@ async fn save_profile(State(s): St, Json(req): Json<ProfileReq>) -> ApiResult<Va
 struct MarkReq {
     status: String,
     note: Option<String>,
+    /// true: change only the status and keep the existing note (quick mark from a card)
+    #[serde(default)]
+    keep_note: bool,
 }
 
 async fn set_mark(
@@ -1301,8 +1304,9 @@ async fn set_mark(
         .unwrap()
         .execute(
             "INSERT INTO marks(vid, status, note, updated) VALUES (?1, ?2, ?3, datetime('now'))
-             ON CONFLICT(vid) DO UPDATE SET status = excluded.status, note = excluded.note, updated = excluded.updated",
-            rusqlite::params![vid, m.status, m.note],
+             ON CONFLICT(vid) DO UPDATE SET status = excluded.status,
+               note = CASE WHEN ?4 THEN marks.note ELSE excluded.note END, updated = excluded.updated",
+            rusqlite::params![vid, m.status, m.note, m.keep_note],
         )
         .map_err(anyhow::Error::from)?;
     Ok(Json(json!({ "ok": true })))
