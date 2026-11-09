@@ -712,6 +712,43 @@ function releasesBlock(d) {
     restBox, moreBtn);
 }
 
+/** An anchor for a description link part. */
+function linkNode(l, text = l.text) {
+  return l.tag ? h('a', { href: `#/tag/${l.tag}` }, text)
+    : l.vn ? h('a', { href: `#/vn/${l.vn}` }, text)
+      : h('a', { href: l.url, target: '_blank', rel: 'noopener' }, text);
+}
+
+/** Put description links back into translated text: each link is looked up by its original
+ *  text (names usually stay untranslated), then by the translation of that text. `used`
+ *  collects the links placed, so the rest can be listed under the description. */
+export function linkify(text, links, translated, used) {
+  const spans = [];
+  links.forEach((l, i) => {
+    if (used.has(i)) return;
+    for (const needle of [l.text, translated[i]]) {
+      if (!needle || needle.trim().length < 2) continue;
+      const at = text.toLowerCase().indexOf(needle.toLowerCase());
+      if (at < 0) continue;
+      const end = at + needle.length;
+      if (spans.some(s => at < s.end && end > s.at)) continue;
+      spans.push({ at, end, i });
+      used.add(i);
+      return;
+    }
+  });
+  spans.sort((a, b) => a.at - b.at);
+  const out = [];
+  let pos = 0;
+  for (const sp of spans) {
+    if (sp.at > pos) out.push(text.slice(pos, sp.at));
+    out.push(linkNode(links[sp.i], text.slice(sp.at, sp.end)));
+    pos = sp.end;
+  }
+  if (pos < text.length) out.push(text.slice(pos));
+  return out;
+}
+
 export async function viewVn(root, id, params = new URLSearchParams()) {
   root.append(spinner());
   let d;
@@ -801,7 +838,10 @@ export async function viewVn(root, id, params = new URLSearchParams()) {
   let tr = !!s.translate;
   const tagTr = new Map(); // tag id -> machine translation (tags without a curated Russian label)
   const descParts = d.description.split(/\[\/?spoiler\]/);
+  // links of the description (tags, novels, sites): put back into the translation afterwards
+  const descLinks = (d.description_parts || []).filter(x => x.tag || x.vn || x.url);
   let descTr = null;
+  let linkTr = [];
   const trNote = h('span', { class: 'muted small tr-note' });
   const trBtn = h('button', { class: 'btn small-btn', type: 'button', onclick: () => {
     tr = !tr; save({ translate: tr }); paintTrBtn(); renderTags(); renderDesc(); if (tr) loadTranslations();
@@ -819,7 +859,9 @@ export async function viewVn(root, id, params = new URLSearchParams()) {
     if (!descTr && d.description) {
       trNote.textContent = 'перевожу…';
       try {
-        descTr = (await api.translate(descParts)).translations;
+        const out = (await api.translate([...descParts, ...descLinks.map(l => l.text)])).translations;
+        descTr = out.slice(0, descParts.length);
+        linkTr = out.slice(descParts.length);
         if (tr) renderDesc();
         trNote.textContent = '';
       } catch (e) {
@@ -883,9 +925,13 @@ export async function viewVn(root, id, params = new URLSearchParams()) {
   const renderDesc = () => {
     if (!(tr && descTr) && d.description_parts) { mount(desc, richText(d.description_parts)); return; }
     const parts = tr && descTr ? descTr : descParts;
-    mount(desc, parts.map((part, i) => (i % 2
-      ? h('span', { class: 'spoiler', title: 'Спойлер — нажмите', onclick: e => e.currentTarget.classList.add('shown') }, part)
-      : part)));
+    const used = new Set();
+    const linked = tr && descTr ? parts.map(part => linkify(part, descLinks, linkTr, used)) : parts.map(p => [p]);
+    const lost = tr && descTr ? descLinks.filter((_, i) => !used.has(i)) : [];
+    mount(desc, linked.map((nodes, i) => (i % 2
+      ? h('span', { class: 'spoiler', title: 'Спойлер — нажмите', onclick: e => e.currentTarget.classList.add('shown') }, nodes)
+      : nodes)),
+    lost.length ? h('p', { class: 'muted small' }, 'Ссылки из описания: ', lost.map((l, i) => [i ? ', ' : '', linkNode(l)])) : null);
   };
   renderDesc();
   if (tr) loadTranslations();
