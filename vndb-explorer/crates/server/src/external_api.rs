@@ -59,6 +59,12 @@ pub async fn status(State(s): St) -> ApiResult<Value> {
         let mut v = json!({});
         for src in SOURCES {
             v[*src] = json!(store::stats(&conn, src)?);
+            if let Some(t) =
+                store::get_meta(&conn, src, "cooldown_until")?.and_then(|t| t.parse::<u64>().ok())
+            {
+                f95zone::set_cooldown_until(t);
+            }
+            v[*src]["cooldown_left"] = json!(f95zone::cooldown_left());
             v[*src]["last_check"] = store::get_meta(&conn, src, "last_check")?
                 .and_then(|c| serde_json::from_str::<Value>(&c).ok())
                 .unwrap_or(Value::Null);
@@ -352,6 +358,8 @@ pub async fn game(
         let mut details_error = None;
         if stale || q.refresh.as_deref() == Some("1") {
             let mut p = F95Zone::new();
+            // a pause the site asked for also holds for pages the user opens
+            ext::load_cooldown(&mut p, &conn)?;
             match p.details(&id) {
                 Ok(g) => {
                     store::save_details(&conn, &g)?;

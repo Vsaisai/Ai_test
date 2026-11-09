@@ -57,6 +57,9 @@ pub enum ProviderError {
     /// The site refused automated access (rate limit, anti-bot check, login wall). The import
     /// stops; it is never bypassed.
     Blocked(String),
+    /// The site asked to slow down ("too many requests"): wait this many seconds, then go on
+    /// slower. This is the site's own rule, so the app keeps to it.
+    RateLimited { wait_secs: u64 },
     /// Network error or the site is down; worth trying again later.
     Unavailable(String),
     /// The answer did not have the expected shape (the site changed).
@@ -67,6 +70,11 @@ impl std::fmt::Display for ProviderError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ProviderError::Blocked(m) => write!(f, "сайт ограничил доступ: {m}"),
+            ProviderError::RateLimited { wait_secs } => write!(
+                f,
+                "сайт попросил подождать (слишком много запросов), примерно {} мин",
+                wait_secs.div_ceil(60).max(1)
+            ),
             ProviderError::Unavailable(m) => write!(f, "сайт недоступен: {m}"),
             ProviderError::Parse(m) => write!(f, "не удалось разобрать ответ сайта: {m}"),
         }
@@ -112,6 +120,16 @@ pub trait Provider {
     fn details(&mut self, ext_id: &str) -> Result<ExtGame, ProviderError>;
     /// The site answered badly (empty page, timeout): ask less often for the rest of the run.
     fn slow_down(&mut self) {}
+    /// The site asked for a pause until this moment (unix seconds): no requests before it.
+    fn respect_cooldown(&mut self, _until_unix: u64) {}
+    /// End of the current pause (unix seconds), to remember it across restarts.
+    fn cooldown_until(&self) -> Option<u64> {
+        None
+    }
+    /// Wait out a "too many requests" pause (tests do not wait).
+    fn rate_pause(&mut self, secs: u64) {
+        std::thread::sleep(std::time::Duration::from_secs(secs));
+    }
     /// Pause before a request is repeated.
     fn retry_pause(&self) -> std::time::Duration {
         std::time::Duration::from_secs(10)
@@ -158,6 +176,30 @@ pub struct RefreshReport {
 }
 
 /// Retry a failed request once after a pause; refusals by the site are never retried.
+/// Apply a pause saved by an earlier run (the app may have been restarted meanwhile).
+pub fn load_cooldown(
+    provider: &mut dyn Provider,
+    conn: &rusqlite::Connection,
+) -> anyhow::Result<()> {
+    if let Some(t) =
+        store::get_meta(conn, provider.id(), "cooldown_until")?.and_then(|t| t.parse().ok())
+    {
+        provider.respect_cooldown(t);
+    }
+    Ok(())
+}
+
+/// Remember the provider's pause, if any.
+pub fn save_cooldown(provider: &dyn Provider, conn: &rusqlite::Connection) -> anyhow::Result<()> {
+    if let Some(t) = provider.cooldown_until() {
+        store::set_meta(conn, provider.id(), "cooldown_until", &t.to_string())?;
+    }
+    Ok(())
+}
+
+/// How many times one run waits out "too many requests" before it stops (and resumes next time).
+pub const MAX_RATE_WAITS: u32 = 3;
+
 /// Repeat a request after a temporary failure (empty answer, timeout, server error): up to two
 /// more tries, with a pause, and the provider slows down for the rest of the run. Refusals by
 /// the site (rate limit, captcha, login) are never repeated.
@@ -167,8 +209,22 @@ fn with_retry<T>(
     mut f: impl FnMut(&mut dyn Provider) -> Result<T, ProviderError>,
 ) -> Result<T, ProviderError> {
     let mut tries = 0;
+    let mut waits = 0;
     loop {
         match f(provider) {
+            // the site asked to slow down: wait as long as it said, then go on twice as slowly
+            Err(ProviderError::RateLimited { wait_secs }) if waits < MAX_RATE_WAITS => {
+                waits += 1;
+                provider.slow_down();
+                provider.slow_down();
+                log(&format!(
+                    "{}: сайт попросил подождать — пауза {} мин, затем продолжу медленнее ({} из {MAX_RATE_WAITS})",
+                    provider.name(),
+                    wait_secs.div_ceil(60).max(1),
+                    waits
+                ));
+                provider.rate_pause(wait_secs);
+            }
             Err(ProviderError::Unavailable(m)) if tries < 2 => {
                 tries += 1;
                 provider.slow_down();
@@ -260,6 +316,7 @@ pub fn refresh(
         ..Default::default()
     };
     let mut seen = std::collections::HashSet::new();
+    load_cooldown(provider, conn)?;
     let finish = |rep: &mut RefreshReport| -> anyhow::Result<()> {
         rep.duplicates = store::duplicate_count(conn, src)?;
         rep.finished_at = store::stamp();
@@ -273,9 +330,10 @@ pub fn refresh(
         )?;
         Ok(())
     };
-    if let Err(e) = provider.prepare() {
+    if let Err(e) = with_retry(provider, log, |p| p.prepare()) {
         rep.stopped = Some(e.to_string());
         log(&format!("{name}: {e}"));
+        save_cooldown(provider, conn)?;
         finish(&mut rep)?;
         return Ok(rep);
     }
@@ -303,7 +361,7 @@ pub fn refresh(
         }
         let list = match with_retry(provider, log, |p| p.list(page)) {
             Ok(l) => l,
-            Err(e @ ProviderError::Blocked(_)) => {
+            Err(e @ (ProviderError::Blocked(_) | ProviderError::RateLimited { .. })) => {
                 rep.stopped = Some(e.to_string());
                 log(&format!("{name}: {e}"));
                 break;
@@ -364,7 +422,9 @@ pub fn refresh(
                                 "{name}: страница {fp} прочитана со второй попытки"
                             ));
                         }
-                        Err(e @ ProviderError::Blocked(_)) => {
+                        Err(
+                            e @ (ProviderError::Blocked(_) | ProviderError::RateLimited { .. }),
+                        ) => {
                             rep.pages_failed.push(fp);
                             rep.stopped = Some(e.to_string());
                             log(&format!("{name}: {e}"));
@@ -397,6 +457,7 @@ pub fn refresh(
         store::del_meta(conn, src, "feed_resume_page")?;
         store::set_meta(conn, src, "feed_complete_at", &store::stamp())?;
     }
+    save_cooldown(provider, conn)?;
     finish(&mut rep)?;
     Ok(rep)
 }
@@ -443,13 +504,14 @@ pub fn audit(
         started_at: store::stamp(),
         ..Default::default()
     };
+    load_cooldown(provider, conn)?;
     let known = store::all_ids(conn, src)?;
     let mut seen = std::collections::HashSet::new();
     let mut page = 1;
     while page <= max_pages {
         let idx = match with_retry(provider, log, |p| p.index_page(page)) {
             Ok(i) => i,
-            Err(e @ ProviderError::Blocked(_)) => {
+            Err(e @ (ProviderError::Blocked(_) | ProviderError::RateLimited { .. })) => {
                 rep.stopped = Some(e.to_string());
                 log(&format!("{name}: {e}"));
                 break;
@@ -508,7 +570,7 @@ pub fn audit(
                     }
                     rep.checked += 1;
                 }
-                Err(e @ ProviderError::Blocked(_)) => {
+                Err(e @ (ProviderError::Blocked(_) | ProviderError::RateLimited { .. })) => {
                     rep.stopped = Some(e.to_string());
                     log(&format!("{name}: {e}"));
                     break;
@@ -521,6 +583,7 @@ pub fn audit(
         }
     }
     rep.finished_at = store::stamp();
+    save_cooldown(provider, conn)?;
     store::set_meta(conn, src, "last_audit", &serde_json::to_string(&rep)?)?;
     Ok(rep)
 }
@@ -617,6 +680,9 @@ mod tests {
         blocked_at: Option<u32>,
         /// page -> how many more times it answers "temporarily unavailable"
         flaky: std::collections::HashMap<u32, u32>,
+        /// page -> how many more times it answers "too many requests"
+        limited: std::collections::HashMap<u32, u32>,
+        paused: Vec<u64>,
         calls: Vec<u32>,
         slowed: u32,
     }
@@ -629,6 +695,8 @@ mod tests {
                 fail_at: None,
                 blocked_at: None,
                 flaky: Default::default(),
+                limited: Default::default(),
+                paused: Vec::new(),
                 calls: Vec::new(),
                 slowed: 0,
             }
@@ -650,6 +718,10 @@ mod tests {
             if self.fail_at == Some(page) {
                 return Err(ProviderError::Parse("broken page".into()));
             }
+            if let Some(n) = self.limited.get_mut(&page).filter(|n| **n > 0) {
+                *n -= 1;
+                return Err(ProviderError::RateLimited { wait_secs: 900 });
+            }
             if let Some(n) = self.flaky.get_mut(&page).filter(|n| **n > 0) {
                 *n -= 1;
                 return Err(ProviderError::Unavailable("пустой ответ".into()));
@@ -669,6 +741,9 @@ mod tests {
         }
         fn retry_pause(&self) -> std::time::Duration {
             std::time::Duration::ZERO
+        }
+        fn rate_pause(&mut self, secs: u64) {
+            self.paused.push(secs);
         }
         fn details(&mut self, id: &str) -> Result<ExtGame, ProviderError> {
             let mut g = game(id, "1", &["2dcg"]);
@@ -818,6 +893,36 @@ mod tests {
         // page progress for the UI: 1..5 of 5
         assert_eq!(progress.borrow().first(), Some(&(1, Some(5))));
         assert!(progress.borrow().contains(&(5, Some(5))));
+    }
+
+    #[test]
+    fn too_many_requests_means_wait_and_go_on_slower() {
+        let conn = store::open_memory();
+        let mut p = Fake::new(pages(4, 2));
+        p.limited.insert(3, 1);
+        let r = refresh(&mut p, &conn, true, 5000, &|_| {}, &|_, _| {}).unwrap();
+        // waited as asked, then read the page and finished
+        assert_eq!(p.paused, vec![900]);
+        assert!(r.complete && r.stopped.is_none(), "{r:?}");
+        assert_eq!(r.discovered, 8);
+        assert!(p.slowed >= 2);
+    }
+
+    #[test]
+    fn a_site_that_keeps_refusing_stops_the_run_for_later() {
+        let conn = store::open_memory();
+        let mut p = Fake::new(pages(4, 2));
+        p.limited.insert(2, 99);
+        let r = refresh(&mut p, &conn, true, 5000, &|_| {}, &|_, _| {}).unwrap();
+        assert_eq!(p.paused.len() as u32, MAX_RATE_WAITS);
+        assert!(r.stopped.as_deref().unwrap().contains("подождать"));
+        assert!(!r.complete);
+        // next time the full pass continues from page 2
+        p.limited.clear();
+        p.calls.clear();
+        let r = refresh(&mut p, &conn, true, 5000, &|_| {}, &|_, _| {}).unwrap();
+        assert_eq!(r.resumed_from, Some(2));
+        assert!(r.complete);
     }
 
     #[test]

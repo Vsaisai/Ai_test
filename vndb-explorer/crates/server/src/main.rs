@@ -41,7 +41,7 @@ enum Cmd {
     },
     /// Refresh third-party catalog indexes (vngames.ru ...) and report matches
     Sources,
-    /// A short test of the F95Zone catalog against the real site (about 7 requests, 2 s apart):
+    /// A short test of the F95Zone catalog against the real site (about 7 requests, 3 s apart):
     /// feed, Games forum list and a few game pages. Results go to external.sqlite.
     F95Check {
         /// Game pages to open
