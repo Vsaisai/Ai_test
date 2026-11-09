@@ -21,6 +21,7 @@ pub mod profile;
 pub mod progress;
 pub mod search;
 pub mod shelves;
+pub mod similar;
 pub mod sources;
 pub mod sync;
 pub mod tagtree;

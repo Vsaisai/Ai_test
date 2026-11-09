@@ -85,6 +85,7 @@ export const api = {
   shelf: (id, base, sort, offset, limit = 48) => call('POST', `/api/shelves/${encodeURIComponent(id)}`, { base, sort, offset, limit }),
   random: req => call('POST', '/api/random', req),
   vn: id => call('GET', `/api/vn/${id}?langs=${encodeURIComponent(langList().join(','))}&any_lang=false`),
+  similar: id => call('GET', `/api/vn/${id}/similar?langs=${encodeURIComponent(langList().join(','))}&adult=${settings().adultTags ? 1 : 0}&hide_ero=${settings().hideAdult ? 1 : 0}`),
   prices: (id, cc) => call('GET', `/api/vn/${id}/prices?cc=${encodeURIComponent(cc)}`),
   my: () => call('GET', '/api/my'),
   profile: () => call('GET', '/api/profile'),

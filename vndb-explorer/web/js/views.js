@@ -986,7 +986,19 @@ export async function viewVn(root, id, params = new URLSearchParams()) {
       h('div', { class: 'tr-line' }, trBtn, trNote),
       d.description ? h('section', {}, h('h2', {}, 'Описание'), desc) : null,
       h('section', {}, h('div', { class: 'section-head' }, h('h2', {}, 'Теги'), tagControls), spoilerLegend, tagBox),
-      shots, rels, releasesBlock(d))));
+      shots, rels, similarBlock(d), releasesBlock(d))));
+}
+
+/** "Similar novels": loaded after the page, by tags (the series itself is left out). */
+function similarBlock(d) {
+  const row = h('div', { class: 'shelf-row' }, spinner());
+  const sec = h('section', { class: 'similar' }, h('h2', {}, 'Похожие новеллы'), row,
+    h('p', { class: 'muted small' }, 'Подобраны по тегам: чем реже общий тег, тем больше он значит. Части той же серии здесь не показываются.'));
+  api.similar(d.id).then(r => {
+    if (!r.items.length) { sec.remove(); return; }
+    row.replaceChildren(...r.items.map(it => card(it)));
+  }).catch(() => sec.remove());
+  return sec;
 }
 
 function communityBlock(d) {
@@ -1027,13 +1039,19 @@ export async function viewMy(root, status) {
     const counts = {};
     for (const m of my.marks) counts[m.status] = (counts[m.status] || 0) + 1;
     const ids = my.marks.filter(m => !current || m.status === current).map(m => Number(m.id.slice(1)));
+    const MY_SORTS = { given: 'Недавно отмеченные', title: 'По алфавиту', rating: 'Рейтинг', votes: 'Популярные', newest: 'Новые', shortest: 'Короткие', longest: 'Длинные' };
+    const sort = MY_SORTS[settings().mySort] ? settings().mySort : 'given';
+    const sortSel = h('select', { 'aria-label': 'Сортировка', onchange: e => { save({ mySort: e.target.value }); viewMy(root, status); } },
+      Object.entries(MY_SORTS).map(([v, l]) => h('option', { value: v, selected: v === sort }, l)));
+    root.replaceChildren();
     mount(root,
       h('div', { class: 'page-head' }, h('h1', {}, 'Мои полки')),
       h('div', { class: 'tabs wrap' },
         h('a', { href: '#/my', class: current ? '' : 'on' }, `Все (${my.marks.length})`),
         Object.entries(MARKS).map(([k, m]) => h('a', { href: `#/my/${k}`, class: current === k ? 'on' : '' }, `${m.icon} ${m.label} (${counts[k] || 0})`))),
       ids.length
-        ? resultGrid(offset => api.search({ ...baseRequest(), lang_mode: 'any', ero: 'show', ids, sort: 'title', offset, limit: 48 }))
+        ? [h('div', { class: 'toolbar' }, sortSel),
+          resultGrid(offset => api.search({ ...baseRequest(), lang_mode: 'any', ero: 'show', ids, sort, offset, limit: 48 }))]
         : h('p', { class: 'muted center' }, 'Здесь пусто. Откройте любую новеллу и нажмите «Хочу», «Читаю» и т.д.'),
     );
   } catch (e) {

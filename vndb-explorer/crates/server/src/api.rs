@@ -396,6 +396,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/api/vn/:id", get(vn_detail))
         .route("/api/vn/:id/prices", get(vn_prices))
+        .route("/api/vn/:id/similar", get(vn_similar))
         .route("/api/random", post(random))
         .route("/api/ext/status", get(external::status))
         .route("/api/ext/refresh", post(external::refresh))
@@ -1054,6 +1055,47 @@ async fn vn_detail(
         ));
     }
     Ok(Json(v))
+}
+
+#[derive(Deserialize)]
+struct SimilarQ {
+    langs: Option<String>,
+    /// "1": count sexual-content tags too
+    adult: Option<String>,
+    /// "1": leave out VNs with sexual content
+    hide_ero: Option<String>,
+}
+
+/// Novels with the most similar tags (rarer tags weigh more).
+async fn vn_similar(
+    State(s): St,
+    Path(id): Path<String>,
+    Query(q): Query<SimilarQ>,
+) -> ApiResult<Value> {
+    let c = s.cat()?;
+    let vid = parse_vid(&id)?;
+    let order: Vec<String> = q
+        .langs
+        .unwrap_or_else(|| "en".into())
+        .split(',')
+        .map(|x| x.trim().to_string())
+        .filter(|x| !x.is_empty())
+        .collect();
+    let opts = vndb_core::similar::Options {
+        adult_tags: q.adult.as_deref() == Some("1"),
+        hide_ero: q.hide_ero.as_deref() == Some("1"),
+        ..Default::default()
+    };
+    let items = blocking(move || {
+        let related = vndb_core::similar::relations(&c, vid);
+        Ok(vndb_core::similar::similar(&c, vid, 16, &opts, &related)
+            .into_iter()
+            .filter_map(|(id, _)| c.get(id))
+            .map(|v| vndb_core::search::card(v, &order, vec![], vec![]))
+            .collect::<Vec<_>>())
+    })
+    .await?;
+    Ok(Json(json!({ "items": items })))
 }
 
 #[derive(Deserialize)]
