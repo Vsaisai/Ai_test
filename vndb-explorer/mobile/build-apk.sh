@@ -17,7 +17,12 @@ rm -rf mobile/android/app/src/main/jniLibs
 cargo ndk "${targets[@]}" -P 24 -o mobile/android/app/src/main/jniLibs build --release -p vnshelf-mobile
 
 cd mobile/android
-./gradlew --no-daemon --console=plain assembleRelease
+# services.gradle.org sometimes stalls: retry the wrapper download / build a few times
+for attempt in 1 2 3; do
+  ./gradlew --no-daemon --console=plain assembleRelease && break
+  [ "$attempt" = 3 ] && exit 1
+  echo "Gradle failed (attempt $attempt), retrying in 30 s"; sleep 30
+done
 
 mkdir -p "$ROOT/target/apk"
 OUT="$ROOT/target/apk/VNShelf-$VERSION.apk"
