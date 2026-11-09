@@ -1,6 +1,6 @@
 // Service worker: the app shell works offline; images and the API always go to the server.
-const SHELL = 'vnshelf-shell-v24';
-const FILES = ['./', 'index.html', 'app.css', 'js/app.js', 'js/api.js', 'js/ui.js', 'js/store.js', 'js/views.js', 'js/taxonomy.js', 'js/lightbox.js', 'js/tagtip.js', 'js/errors.js', 'js/profile.js', 'js/filters.js',
+const SHELL = 'vnshelf-shell-v27';
+const FILES = ['./', 'index.html', 'app.css', 'js/app.js', 'js/api.js', 'js/ui.js', 'js/store.js', 'js/views.js', 'js/taxonomy.js', 'js/lightbox.js', 'js/tagtip.js', 'js/errors.js', 'js/profile.js', 'js/filters.js', 'js/external.js', 'js/quickmark.js',
   'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png'];
 
 self.addEventListener('install', e => {

@@ -41,6 +41,13 @@ enum Cmd {
     },
     /// Refresh third-party catalog indexes (vngames.ru ...) and report matches
     Sources,
+    /// A short test of the F95Zone catalog against the real site (about 7 requests, 2 s apart):
+    /// feed, Games forum list and a few game pages. Results go to external.sqlite.
+    F95Check {
+        /// Game pages to open
+        #[arg(long, default_value_t = 3)]
+        games: usize,
+    },
     /// Start the web interface
     Serve {
         /// Address to listen on. Use 0.0.0.0:8080 to open it from a phone in the same network
@@ -102,6 +109,28 @@ fn main() -> Result<()> {
                     )?;
                     eprintln!("{}", serde_json::to_string(&r)?);
                 }
+            }
+            Ok(())
+        }
+        Cmd::F95Check { games } => {
+            let conn = vndb_core::external::store::open(&data.join("external.sqlite"))?;
+            let r = vndb_core::external::f95zone::live_check(&conn, games.min(10), &|m: &str| {
+                println!("{m}")
+            })?;
+            println!();
+            println!(
+                "Итог: {}{}",
+                if r.ok {
+                    "все проверки пройдены"
+                } else {
+                    "есть проблемы (см. выше)"
+                },
+                r.stopped
+                    .map(|s| format!(" — остановлено: {s}"))
+                    .unwrap_or_default()
+            );
+            if let (Some(f), Some(t)) = (r.feed_releases, r.forum_threads) {
+                println!("В ленте {f} релизов, в форуме Games {t} тем.");
             }
             Ok(())
         }

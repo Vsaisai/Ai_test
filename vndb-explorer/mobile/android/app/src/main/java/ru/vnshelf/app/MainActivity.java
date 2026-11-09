@@ -18,6 +18,13 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.TextView;
 
+import org.json.JSONObject;
+
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
+
 /**
  * Thin shell: the Rust library (libvnshelf.so) runs the same local server as the desktop
  * version on 127.0.0.1 and this activity shows it in a WebView. External links open in the
@@ -33,6 +40,13 @@ public class MainActivity extends Activity {
 
     private WebView web;
     private int port = -1;
+
+    private static final int REQ_SAVE_FILE = 41;
+    private static final int REQ_OPEN_FILE = 42;
+    /** Largest file the page may open (the shelves file is a few hundred KB at most). */
+    private static final int MAX_OPEN_BYTES = 8 * 1024 * 1024;
+    /** Text waiting for the user to pick where to save it. */
+    private String pendingSave;
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -129,6 +143,39 @@ public class MainActivity extends Activity {
             return Updater.status();
         }
 
+        /** "Save as" dialog; the page gets window.VNShelfFileSaved(true|false). */
+        @JavascriptInterface
+        public void saveFile(String name, String text) {
+            runOnUiThread(() -> {
+                pendingSave = text;
+                Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+                i.addCategory(Intent.CATEGORY_OPENABLE);
+                i.setType("application/json");
+                i.putExtra(Intent.EXTRA_TITLE, name);
+                try {
+                    startActivityForResult(i, REQ_SAVE_FILE);
+                } catch (ActivityNotFoundException e) {
+                    pendingSave = null;
+                    callPage("VNShelfFileSaved", "false");
+                }
+            });
+        }
+
+        /** "Open file" dialog; the page gets window.VNShelfFileOpened(text or null). */
+        @JavascriptInterface
+        public void openFile() {
+            runOnUiThread(() -> {
+                Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                i.addCategory(Intent.CATEGORY_OPENABLE);
+                i.setType("*/*");
+                try {
+                    startActivityForResult(i, REQ_OPEN_FILE);
+                } catch (ActivityNotFoundException e) {
+                    callPage("VNShelfFileOpened", "null");
+                }
+            });
+        }
+
         @JavascriptInterface
         public void keepAwake(boolean on) {
             runOnUiThread(() -> {
@@ -138,6 +185,55 @@ public class MainActivity extends Activity {
                     getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
                 }
             });
+        }
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    protected void onActivityResult(int request, int result, Intent data) {
+        super.onActivityResult(request, result, data);
+        Uri uri = result == RESULT_OK && data != null ? data.getData() : null;
+        if (request == REQ_SAVE_FILE) {
+            boolean ok = false;
+            if (uri != null && pendingSave != null) {
+                try (OutputStream out = getContentResolver().openOutputStream(uri, "wt")) {
+                    if (out != null) {
+                        out.write(pendingSave.getBytes(StandardCharsets.UTF_8));
+                        ok = true;
+                    }
+                } catch (Exception ignored) {
+                    // reported to the page as a failure
+                }
+            }
+            pendingSave = null;
+            callPage("VNShelfFileSaved", ok ? "true" : "false");
+        } else if (request == REQ_OPEN_FILE) {
+            String text = null;
+            if (uri != null) {
+                try (InputStream in = getContentResolver().openInputStream(uri)) {
+                    if (in != null) {
+                        ByteArrayOutputStream buf = new ByteArrayOutputStream();
+                        byte[] chunk = new byte[16384];
+                        int n;
+                        while ((n = in.read(chunk)) > 0 && buf.size() <= MAX_OPEN_BYTES) {
+                            buf.write(chunk, 0, n);
+                        }
+                        if (buf.size() <= MAX_OPEN_BYTES) {
+                            text = new String(buf.toByteArray(), StandardCharsets.UTF_8);
+                        }
+                    }
+                } catch (Exception ignored) {
+                    // reported to the page as "nothing opened"
+                }
+            }
+            callPage("VNShelfFileOpened", text == null ? "null" : JSONObject.quote(text));
+        }
+    }
+
+    /** Call window.fn(arg) in the page if it defined it; arg is a JavaScript literal. */
+    private void callPage(String fn, String arg) {
+        if (web != null) {
+            web.evaluateJavascript("window." + fn + " && window." + fn + "(" + arg + ")", null);
         }
     }
 

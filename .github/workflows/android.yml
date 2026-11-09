@@ -95,6 +95,8 @@ jobs:
       # The code repository is private, so the app looks for updates in a public repository that
       # holds only release builds. VNDB_SECRET: fine-grained token, access to that repository only,
       # Contents: Read and write. It is used here only and never ends up in the APK.
+      # vndb-explorer/mobile/PUBLISH_PUBLIC: "yes" also publishes to the public repository (the app
+      # offers the update to everyone); anything else keeps the release in this repository only.
       - name: Publish to the public releases repository
         if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         env:
@@ -102,6 +104,10 @@ jobs:
           PUBLIC_REPO: Vsaisai/vnshelf-releases
         run: |
           TAG="mobile-v$VNSHELF_VERSION"
+          if [ "$(tr -d ' \r\n' < mobile/PUBLISH_PUBLIC 2>/dev/null)" != "yes" ]; then
+            echo "::notice::$TAG stays in this repository only (mobile/PUBLISH_PUBLIC is not \"yes\")."
+            exit 0
+          fi
           if [ -z "$GH_TOKEN" ]; then
             echo "::warning::Secret VNDB_SECRET is not set: the public releases repository is not updated."
             exit 0

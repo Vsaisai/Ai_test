@@ -7,6 +7,7 @@ import {
 } from './ui.js';
 import { CURATED, ADULT, tagLabel, catRu, resolveGroup, hasRu } from './taxonomy.js';
 import { openLightbox } from './lightbox.js';
+import { extHomeSection, extSettings, extVnBlock, extOn } from './external.js';
 
 const SORTS = {
   relevance: 'По соответствию', votes: 'Популярные', rating: 'Рейтинг', newest: 'Новые', oldest: 'Старые',
@@ -182,6 +183,7 @@ export async function viewHome(root) {
             h('span', { class: 'shelf-title' }, sh.title),
             h('span', { class: 'shelf-all' }, `все ${sh.total.toLocaleString('ru')} →`)),
           h('div', { class: 'shelf-row' }, sh.items.map(it => card(it))))))),
+      extHomeSection(),
     );
   } catch (e) {
     mount(root, errorBox(e, () => viewHome(root)));
@@ -710,6 +712,43 @@ function releasesBlock(d) {
     restBox, moreBtn);
 }
 
+/** An anchor for a description link part. */
+function linkNode(l, text = l.text) {
+  return l.tag ? h('a', { href: `#/tag/${l.tag}` }, text)
+    : l.vn ? h('a', { href: `#/vn/${l.vn}` }, text)
+      : h('a', { href: l.url, target: '_blank', rel: 'noopener' }, text);
+}
+
+/** Put description links back into translated text: each link is looked up by its original
+ *  text (names usually stay untranslated), then by the translation of that text. `used`
+ *  collects the links placed, so the rest can be listed under the description. */
+export function linkify(text, links, translated, used) {
+  const spans = [];
+  links.forEach((l, i) => {
+    if (used.has(i)) return;
+    for (const needle of [l.text, translated[i]]) {
+      if (!needle || needle.trim().length < 2) continue;
+      const at = text.toLowerCase().indexOf(needle.toLowerCase());
+      if (at < 0) continue;
+      const end = at + needle.length;
+      if (spans.some(s => at < s.end && end > s.at)) continue;
+      spans.push({ at, end, i });
+      used.add(i);
+      return;
+    }
+  });
+  spans.sort((a, b) => a.at - b.at);
+  const out = [];
+  let pos = 0;
+  for (const sp of spans) {
+    if (sp.at > pos) out.push(text.slice(pos, sp.at));
+    out.push(linkNode(links[sp.i], text.slice(sp.at, sp.end)));
+    pos = sp.end;
+  }
+  if (pos < text.length) out.push(text.slice(pos));
+  return out;
+}
+
 export async function viewVn(root, id, params = new URLSearchParams()) {
   root.append(spinner());
   let d;
@@ -756,6 +795,7 @@ export async function viewVn(root, id, params = new URLSearchParams()) {
         h('span', { class: 'price', 'data-url': src.url }),
         src.release ? h('div', { class: 'muted small' }, src.release, src.platforms.length ? ` · ${src.platforms.map(p => PLATFORMS[p] || p).join(', ')}` : '') : null)), 4))),
     communityBlock(d),
+    extVnBlock(d),
     hasSteam ? h('div', { class: 'toolbar' }, h('button', { class: 'btn', onclick: async e => {
       e.target.disabled = true; priceOut.textContent = 'Узнаю цены…';
       try {
@@ -798,7 +838,10 @@ export async function viewVn(root, id, params = new URLSearchParams()) {
   let tr = !!s.translate;
   const tagTr = new Map(); // tag id -> machine translation (tags without a curated Russian label)
   const descParts = d.description.split(/\[\/?spoiler\]/);
+  // links of the description (tags, novels, sites): put back into the translation afterwards
+  const descLinks = (d.description_parts || []).filter(x => x.tag || x.vn || x.url);
   let descTr = null;
+  let linkTr = [];
   const trNote = h('span', { class: 'muted small tr-note' });
   const trBtn = h('button', { class: 'btn small-btn', type: 'button', onclick: () => {
     tr = !tr; save({ translate: tr }); paintTrBtn(); renderTags(); renderDesc(); if (tr) loadTranslations();
@@ -816,7 +859,9 @@ export async function viewVn(root, id, params = new URLSearchParams()) {
     if (!descTr && d.description) {
       trNote.textContent = 'перевожу…';
       try {
-        descTr = (await api.translate(descParts)).translations;
+        const out = (await api.translate([...descParts, ...descLinks.map(l => l.text)])).translations;
+        descTr = out.slice(0, descParts.length);
+        linkTr = out.slice(descParts.length);
         if (tr) renderDesc();
         trNote.textContent = '';
       } catch (e) {
@@ -880,9 +925,13 @@ export async function viewVn(root, id, params = new URLSearchParams()) {
   const renderDesc = () => {
     if (!(tr && descTr) && d.description_parts) { mount(desc, richText(d.description_parts)); return; }
     const parts = tr && descTr ? descTr : descParts;
-    mount(desc, parts.map((part, i) => (i % 2
-      ? h('span', { class: 'spoiler', title: 'Спойлер — нажмите', onclick: e => e.currentTarget.classList.add('shown') }, part)
-      : part)));
+    const used = new Set();
+    const linked = tr && descTr ? parts.map(part => linkify(part, descLinks, linkTr, used)) : parts.map(p => [p]);
+    const lost = tr && descTr ? descLinks.filter((_, i) => !used.has(i)) : [];
+    mount(desc, linked.map((nodes, i) => (i % 2
+      ? h('span', { class: 'spoiler', title: 'Спойлер — нажмите', onclick: e => e.currentTarget.classList.add('shown') }, nodes)
+      : nodes)),
+    lost.length ? h('p', { class: 'muted small' }, 'Ссылки из описания: ', lost.map((l, i) => [i ? ', ' : '', linkNode(l)])) : null);
   };
   renderDesc();
   if (tr) loadTranslations();
@@ -937,11 +986,25 @@ export async function viewVn(root, id, params = new URLSearchParams()) {
       h('div', { class: 'tr-line' }, trBtn, trNote),
       d.description ? h('section', {}, h('h2', {}, 'Описание'), desc) : null,
       h('section', {}, h('div', { class: 'section-head' }, h('h2', {}, 'Теги'), tagControls), spoilerLegend, tagBox),
-      shots, rels, releasesBlock(d))));
+      shots, rels, similarBlock(d), releasesBlock(d))));
+}
+
+/** "Similar novels": loaded after the page, by tags (the series itself is left out). */
+function similarBlock(d) {
+  const row = h('div', { class: 'shelf-row' }, spinner());
+  const sec = h('section', { class: 'similar' }, h('h2', {}, 'Похожие новеллы'), row,
+    h('p', { class: 'muted small' }, 'Подобраны по тегам: чем реже общий тег, тем больше он значит. Части той же серии здесь не показываются.'));
+  api.similar(d.id).then(r => {
+    if (!r.items.length) { sec.remove(); return; }
+    row.replaceChildren(...r.items.map(it => card(it)));
+  }).catch(() => sec.remove());
+  return sec;
 }
 
 function communityBlock(d) {
-  const list = d.community || [];
+  // a game already found in an external catalog needs no search link to the same site
+  const found = new Set((d.external || []).map(x => x.source));
+  const list = (d.community || []).filter(l => l.direct || !found.has(l.source) || !extOn());
   if (!list.length) return null;
   const direct = list.filter(l => l.direct);
   const search = list.filter(l => !l.direct);
@@ -976,18 +1039,85 @@ export async function viewMy(root, status) {
     const counts = {};
     for (const m of my.marks) counts[m.status] = (counts[m.status] || 0) + 1;
     const ids = my.marks.filter(m => !current || m.status === current).map(m => Number(m.id.slice(1)));
+    const MY_SORTS = { given: 'Недавно отмеченные', title: 'По алфавиту', rating: 'Рейтинг', votes: 'Популярные', newest: 'Новые', shortest: 'Короткие', longest: 'Длинные' };
+    const sort = MY_SORTS[settings().mySort] ? settings().mySort : 'given';
+    const sortSel = h('select', { 'aria-label': 'Сортировка', onchange: e => { save({ mySort: e.target.value }); viewMy(root, status); } },
+      Object.entries(MY_SORTS).map(([v, l]) => h('option', { value: v, selected: v === sort }, l)));
+    root.replaceChildren();
     mount(root,
       h('div', { class: 'page-head' }, h('h1', {}, 'Мои полки')),
       h('div', { class: 'tabs wrap' },
         h('a', { href: '#/my', class: current ? '' : 'on' }, `Все (${my.marks.length})`),
         Object.entries(MARKS).map(([k, m]) => h('a', { href: `#/my/${k}`, class: current === k ? 'on' : '' }, `${m.icon} ${m.label} (${counts[k] || 0})`))),
       ids.length
-        ? resultGrid(offset => api.search({ ...baseRequest(), lang_mode: 'any', ero: 'show', ids, sort: 'title', offset, limit: 48 }))
+        ? [h('div', { class: 'toolbar' }, sortSel),
+          resultGrid(offset => api.search({ ...baseRequest(), lang_mode: 'any', ero: 'show', ids, sort, offset, limit: 48 }))]
         : h('p', { class: 'muted center' }, 'Здесь пусто. Откройте любую новеллу и нажмите «Хочу», «Читаю» и т.д.'),
+      shelvesFileBox(() => viewMy(root, status)),
     );
   } catch (e) {
     mount(root, errorBox(e));
   }
+}
+
+/** Save the shelves to a file / load them back (another device, a backup). */
+function shelvesFileBox(reload) {
+  const out = h('div', {});
+  const native = window.VNShelfNative;
+  const save = async () => {
+    if (native && native.saveFile) {
+      try {
+        const data = await api.myExport();
+        window.VNShelfFileSaved = ok => toast(ok ? 'Полки сохранены в файл' : 'Файл не сохранён');
+        native.saveFile('vnshelf-shelves.json', JSON.stringify(data, null, 2));
+      } catch (e) { toast(e.message); }
+      return;
+    }
+    const a = h('a', { href: api.myExportUrl(), download: 'vnshelf-shelves.json' });
+    document.body.append(a); a.click(); a.remove();
+  };
+  const offer = text => {
+    let data;
+    try { data = JSON.parse(text); } catch { data = null; }
+    if (!data || data.format !== 'vnshelf-shelves' || !Array.isArray(data.marks)) {
+      out.replaceChildren(h('p', { class: 'error small' }, 'Это не файл полок VN Shelf.'));
+      return;
+    }
+    const run = async replace => {
+      try {
+        const r = await api.myImport(data, replace);
+        toast(`Добавлено: ${r.added}, обновлено: ${r.updated}${r.skipped ? `, без изменений: ${r.skipped}` : ''}`);
+        reload();
+      } catch (e) { out.replaceChildren(errorBox(e)); }
+    };
+    out.replaceChildren(h('div', { class: 'panel' },
+      h('p', {}, `В файле отметок: ${data.marks.length}.`),
+      h('div', { class: 'toolbar' },
+        h('button', { class: 'btn primary', onclick: () => run(false) }, 'Объединить с моими'),
+        h('button', { class: 'btn', onclick: () => { if (confirm('Текущие полки будут заменены содержимым файла. Продолжить?')) run(true); } }, 'Заменить мои полки'),
+        h('button', { class: 'btn', onclick: () => out.replaceChildren() }, 'Отмена')),
+      h('p', { class: 'muted small' }, 'При объединении из двух отметок одной новеллы остаётся более новая.')));
+  };
+  const load = () => {
+    if (native && native.openFile) {
+      window.VNShelfFileOpened = text => { if (text) offer(text); };
+      native.openFile();
+      return;
+    }
+    const input = h('input', { type: 'file', accept: '.json,application/json', hidden: true, onchange: async e => {
+      const f = e.target.files[0];
+      input.remove();
+      if (f) offer(await f.text());
+    } });
+    document.body.append(input); input.click();
+  };
+  return h('details', { class: 'panel form shelves-file' },
+    h('summary', {}, h('h2', {}, 'Перенос и резервная копия')),
+    h('p', { class: 'muted small' }, 'Сохраните полки в файл, чтобы перенести их на другое устройство или не потерять при переустановке.'),
+    h('div', { class: 'toolbar' },
+      h('button', { class: 'btn', onclick: save }, 'Сохранить в файл'),
+      h('button', { class: 'btn', onclick: load }, 'Загрузить из файла')),
+    out);
 }
 
 // ---------- settings ----------
@@ -1099,6 +1229,7 @@ export async function viewSettings(root) {
       check('hideCancelled', 'Скрывать отменённые проекты'),
       field('Порядок языков вручную', text('langs', 'en, ru'), 'Коды через запятую: en, ru, uk, es, de… Первый — главный.'),
       h('h3', {}, 'Каталоги переводов и сообщества'), srcBox,
+      extSettings(),
       IN_APP ? null : field('Адрес сервера', text('apiBase', 'пусто = этот же сервер'), 'Нужно, только если интерфейс открыт не с того сервера, где база: например http://192.168.1.10:8080'),
       IN_APP ? null : h('p', { class: 'muted small' }, 'Чтобы открыть с телефона: запустите на ПК «vndb-web serve --addr 0.0.0.0:8080» и откройте http://IP-компьютера:8080 в браузере телефона.'),
       h('div', { class: 'toolbar' }, reset)),

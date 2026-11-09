@@ -20,6 +20,10 @@ use vndb_core::shelves::{self, Shelves};
 use vndb_core::sources::Sources;
 use vndb_core::Catalog;
 
+#[path = "external_api.rs"]
+mod external;
+pub use external::start_refresh as start_external_refresh;
+
 #[derive(RustEmbed)]
 #[folder = "../../web/"]
 struct Assets;
@@ -171,6 +175,8 @@ pub struct AppState {
     /// Cached result of the last update check: (when, value)
     pub updates: Mutex<Option<(std::time::Instant, Value)>>,
     pub http: reqwest::Client,
+    /// VNDB match index for external games: (catalog imported_at, index)
+    pub ext_index: Mutex<Option<(String, Arc<vndb_core::external::matching::Index>)>>,
 }
 
 /// Open the personal database; a damaged file is kept as `user.sqlite.broken-<time>` and a new
@@ -271,6 +277,7 @@ impl AppState {
                 .user_agent(vndb_core::http::user_agent())
                 .timeout(std::time::Duration::from_secs(30))
                 .build()?,
+            ext_index: Mutex::new(None),
             data_dir,
         })
     }
@@ -389,8 +396,19 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/api/vn/:id", get(vn_detail))
         .route("/api/vn/:id/prices", get(vn_prices))
+        .route("/api/vn/:id/similar", get(vn_similar))
         .route("/api/random", post(random))
+        .route("/api/ext/status", get(external::status))
+        .route("/api/ext/refresh", post(external::refresh))
+        .route("/api/ext/search", post(external::search))
+        .route("/api/ext/tags", get(external::tags))
+        .route("/api/ext/game/:source/:id", get(external::game))
+        .route("/api/ext/game/:source/:id/match", put(external::set_match))
+        .route("/api/ext/audit", post(external::audit))
+        .route("/api/ext/check", post(external::check))
         .route("/api/my", get(my_list))
+        .route("/api/my/export", get(my_export))
+        .route("/api/my/import", post(my_import))
         .route("/api/profile", get(profile).put(save_profile))
         .route("/api/my/:id", put(set_mark).delete(delete_mark))
         .route("/img/*path", get(image))
@@ -1021,6 +1039,7 @@ async fn vn_detail(
         .ok();
     v["mark"] = json!(mark.as_ref().map(|m| &m.0));
     v["note"] = json!(mark.and_then(|m| m.1));
+    v["external"] = external::for_vn(&s, vid);
     if let Some(vn) = s.cat()?.get(vid) {
         let defs = s.sources.read().unwrap_or_else(PoisonError::into_inner);
         let order: Vec<String> = v["langs"]
@@ -1041,6 +1060,47 @@ async fn vn_detail(
         ));
     }
     Ok(Json(v))
+}
+
+#[derive(Deserialize)]
+struct SimilarQ {
+    langs: Option<String>,
+    /// "1": count sexual-content tags too
+    adult: Option<String>,
+    /// "1": leave out VNs with sexual content
+    hide_ero: Option<String>,
+}
+
+/// Novels with the most similar tags (rarer tags weigh more).
+async fn vn_similar(
+    State(s): St,
+    Path(id): Path<String>,
+    Query(q): Query<SimilarQ>,
+) -> ApiResult<Value> {
+    let c = s.cat()?;
+    let vid = parse_vid(&id)?;
+    let order: Vec<String> = q
+        .langs
+        .unwrap_or_else(|| "en".into())
+        .split(',')
+        .map(|x| x.trim().to_string())
+        .filter(|x| !x.is_empty())
+        .collect();
+    let opts = vndb_core::similar::Options {
+        adult_tags: q.adult.as_deref() == Some("1"),
+        hide_ero: q.hide_ero.as_deref() == Some("1"),
+        ..Default::default()
+    };
+    let items = blocking(move || {
+        let related = vndb_core::similar::relations(&c, vid);
+        Ok(vndb_core::similar::similar(&c, vid, 16, &opts, &related)
+            .into_iter()
+            .filter_map(|(id, _)| c.get(id))
+            .map(|v| vndb_core::search::card(v, &order, vec![], vec![]))
+            .collect::<Vec<_>>())
+    })
+    .await?;
+    Ok(Json(json!({ "items": items })))
 }
 
 #[derive(Deserialize)]
@@ -1225,6 +1285,9 @@ async fn save_profile(State(s): St, Json(req): Json<ProfileReq>) -> ApiResult<Va
 struct MarkReq {
     status: String,
     note: Option<String>,
+    /// true: change only the status and keep the existing note (quick mark from a card)
+    #[serde(default)]
+    keep_note: bool,
 }
 
 async fn set_mark(
@@ -1244,11 +1307,134 @@ async fn set_mark(
         .unwrap()
         .execute(
             "INSERT INTO marks(vid, status, note, updated) VALUES (?1, ?2, ?3, datetime('now'))
-             ON CONFLICT(vid) DO UPDATE SET status = excluded.status, note = excluded.note, updated = excluded.updated",
-            rusqlite::params![vid, m.status, m.note],
+             ON CONFLICT(vid) DO UPDATE SET status = excluded.status,
+               note = CASE WHEN ?4 THEN marks.note ELSE excluded.note END, updated = excluded.updated",
+            rusqlite::params![vid, m.status, m.note, m.keep_note],
         )
         .map_err(anyhow::Error::from)?;
     Ok(Json(json!({ "ok": true })))
+}
+
+/// The personal shelves as a file (to move them to another device or keep a copy).
+async fn my_export(State(s): St) -> Result<Response, ApiError> {
+    let (marks, name) = {
+        let u = s.user.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut st = u
+            .prepare("SELECT vid, status, note, updated FROM marks ORDER BY updated DESC")
+            .map_err(anyhow::Error::from)?;
+        let marks: Vec<Value> = st
+            .query_map([], |r| {
+                Ok(json!({ "id": format!("v{}", r.get::<_, u32>(0)?), "status": r.get::<_, String>(1)?,
+                           "note": r.get::<_, Option<String>>(2)?, "updated": r.get::<_, Option<String>>(3)? }))
+            })
+            .map_err(anyhow::Error::from)?
+            .filter_map(Result::ok)
+            .collect();
+        (marks, user_setting(&u, "profile_name"))
+    };
+    let body = json!({
+        "format": "vnshelf-shelves", "format_version": 1, "app_version": vndb_core::app_version(),
+        "profile": { "name": name }, "marks": marks,
+    });
+    let text = serde_json::to_string_pretty(&body).map_err(anyhow::Error::from)?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/json; charset=utf-8"),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"vnshelf-shelves.json\"",
+            ),
+        ],
+        text,
+    )
+        .into_response())
+}
+
+#[derive(Deserialize)]
+struct ImportMark {
+    id: String,
+    status: String,
+    note: Option<String>,
+    updated: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct MyImport {
+    format: Option<String>,
+    marks: Vec<ImportMark>,
+    /// true: the file replaces the shelves; false: merge (the newer mark of a novel wins)
+    #[serde(default)]
+    replace: bool,
+}
+
+async fn my_import(State(s): St, Json(req): Json<MyImport>) -> ApiResult<Value> {
+    if req
+        .format
+        .as_deref()
+        .is_some_and(|f| f != "vnshelf-shelves")
+    {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "это не файл полок VN Shelf".into(),
+        ));
+    }
+    if req.marks.len() > 100_000 {
+        return Err(ApiError(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "too many marks".into(),
+        ));
+    }
+    let mut u = s.user.lock().unwrap_or_else(PoisonError::into_inner);
+    let tx = u.transaction().map_err(anyhow::Error::from)?;
+    if req.replace {
+        tx.execute("DELETE FROM marks", [])
+            .map_err(anyhow::Error::from)?;
+    }
+    let (mut added, mut updated, mut skipped) = (0, 0, 0);
+    for m in &req.marks {
+        let Ok(vid) = parse_vid(&m.id) else {
+            skipped += 1;
+            continue;
+        };
+        if !STATUSES.contains(&m.status.as_str()) {
+            skipped += 1;
+            continue;
+        }
+        let when = m
+            .updated
+            .clone()
+            .filter(|t| t.len() >= 10 && t.len() <= 32)
+            .unwrap_or_else(|| "1970-01-01 00:00:00".into());
+        let existing: Option<String> = tx
+            .query_row("SELECT updated FROM marks WHERE vid = ?1", [vid], |r| {
+                r.get(0)
+            })
+            .ok();
+        match existing {
+            // keep the newer of the two
+            Some(cur) if cur >= when => skipped += 1,
+            Some(_) => {
+                tx.execute(
+                    "UPDATE marks SET status = ?2, note = ?3, updated = ?4 WHERE vid = ?1",
+                    rusqlite::params![vid, m.status, m.note, when],
+                )
+                .map_err(anyhow::Error::from)?;
+                updated += 1;
+            }
+            None => {
+                tx.execute(
+                    "INSERT INTO marks(vid, status, note, updated) VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![vid, m.status, m.note, when],
+                )
+                .map_err(anyhow::Error::from)?;
+                added += 1;
+            }
+        }
+    }
+    tx.commit().map_err(anyhow::Error::from)?;
+    Ok(Json(
+        json!({ "added": added, "updated": updated, "skipped": skipped }),
+    ))
 }
 
 async fn delete_mark(State(s): St, Path(id): Path<String>) -> ApiResult<Value> {

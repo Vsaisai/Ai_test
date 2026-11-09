@@ -59,6 +59,8 @@ pub enum Sort {
     Title,
     Shortest,
     Longest,
+    /// The order of `ids` (personal lists: most recently marked first)
+    Given,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -445,6 +447,11 @@ pub fn search(cat: &Catalog, req: &SearchRequest) -> Result<SearchResponse> {
     }
 
     let by_title = |a: &Hit, b: &Hit| a.title.to_lowercase().cmp(&b.title.to_lowercase());
+    let given: std::collections::HashMap<u32, usize> = req
+        .ids
+        .as_ref()
+        .map(|v| v.iter().enumerate().map(|(i, id)| (*id, i)).collect())
+        .unwrap_or_default();
     let rating = |h: &Hit| if h.v.votecount == 0 { 0.0 } else { h.v.rating };
     hits.sort_by(|a, b| match req.sort {
         Sort::Relevance => {
@@ -491,6 +498,11 @@ pub fn search(cat: &Catalog, req: &SearchRequest) -> Result<SearchResponse> {
             k(a).cmp(&k(b)).then_with(|| by_title(a, b))
         }
         Sort::Title => by_title(a, b),
+        Sort::Given => given
+            .get(&a.v.id)
+            .unwrap_or(&usize::MAX)
+            .cmp(given.get(&b.v.id).unwrap_or(&usize::MAX))
+            .then_with(|| by_title(a, b)),
         Sort::Shortest => {
             a.v.length_minutes
                 .unwrap_or(u32::MAX)

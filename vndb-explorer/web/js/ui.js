@@ -112,7 +112,7 @@ export function card(it, opts = {}) {
   const age = it.minage !== null && it.minage !== undefined ? h('span', { class: 'badge age', title: 'Возрастной рейтинг' }, `${it.minage}+`) : null;
   if (it.mark && MARKS[it.mark]) badges.append(h('span', { class: 'badge mark', title: MARKS[it.mark].label }, MARKS[it.mark].icon));
   const href = `#/vn/${it.id}${opts.hl && opts.hl.length ? `?hl=${opts.hl.join(',')}` : ''}`;
-  return h('a', { class: 'card', href, title: it.original && it.original !== it.title ? `${it.title}\n${it.original}` : it.title },
+  return h('a', { class: 'card', href, 'data-vn': it.id, 'data-mark': it.mark || '', title: it.original && it.original !== it.title ? `${it.title}\n${it.original}` : it.title },
     h('div', { class: 'cover-wrap' }, cover(it.image, it.img_sexual, it.title, 'cover', { full: it.image_full, thumbW: 256, fullW: 600 }), badges, age),
     h('div', { class: 'card-title' }, it.title),
     h('div', { class: 'card-meta' }, meta),
@@ -170,7 +170,7 @@ export function debounce(fn, ms = 250) {
 
 // ---------- job progress (download / import / sync) ----------
 
-const JOB_TITLES = { import: 'Загрузка базы VNDB', sync: 'Новые новеллы и релизы', sources: 'Индексы каталогов' };
+const JOB_TITLES = { import: 'Загрузка базы VNDB', sync: 'Новые новеллы и релизы', sources: 'Индексы каталогов', external: 'Каталог F95Zone', 'external-audit': 'Сверка с форумом F95Zone', 'external-check': 'Проверка F95Zone' };
 let detailsOpen = false;
 
 /** Compact progress line: "42% text" and a bar (null percent = unknown size, running stripe). */

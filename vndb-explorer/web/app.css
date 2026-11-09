@@ -121,7 +121,8 @@ main { max-width: 1400px; margin: 0 auto; padding: 12px 16px 24px; }
 
 /* ---- cards ---- */
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--card-w), 1fr)); gap: 14px; }
-.card { display: flex; flex-direction: column; gap: 3px; color: var(--text); min-width: 0; }
+.card { display: flex; flex-direction: column; gap: 3px; color: var(--text); min-width: 0; -webkit-touch-callout: none; }
+.card img { -webkit-user-drag: none; }
 .card:hover { text-decoration: none; }
 .card:hover .cover img { transform: scale(1.03); }
 .cover-wrap { position: relative; }
@@ -130,7 +131,7 @@ main { max-width: 1400px; margin: 0 auto; padding: 12px 16px 24px; }
 .cover.nocover { display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 12px; }
 .cover.blurred img, .shot.blurred img { filter: blur(18px) saturate(.6); transform: scale(1.1); }
 .reveal {
-  position: absolute; inset: 0; margin: auto; width: 56px; height: 32px; border-radius: 16px; border: 0;
+  position: absolute; inset: 0; margin: auto; width: max-content; padding: 0 14px; height: 32px; border-radius: 16px; border: 0;
   background: rgba(0,0,0,.6); color: #fff; font-weight: 700; cursor: pointer;
 }
 .badges { position: absolute; top: 6px; left: 6px; right: 6px; display: flex; gap: 4px; flex-wrap: wrap; pointer-events: none; }
@@ -560,3 +561,16 @@ html:not(.touch-nav) { --card-w: 170px; }
   html:not(.touch-nav) .vn-page > .vn-side { grid-column: 2; grid-row: 1 / 5; }
   html:not(.touch-nav) .vn-side > .panel:first-child { margin-top: 0; }
 }
+
+/* quick mark menu (long press / right click on a cover) */
+.qm { position: fixed; z-index: 60; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); padding: 6px; display: flex; flex-direction: column; min-width: 190px; }
+.qm-title { font-size: 13px; color: var(--muted); padding: 4px 10px 6px; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qm button { text-align: left; background: none; border: 0; color: var(--text); padding: 9px 10px; border-radius: 8px; font: inherit; cursor: pointer; }
+.qm button:hover, .qm button:focus-visible { background: var(--panel-2); }
+.qm button.on { font-weight: 700; color: var(--accent); }
+.qm button.rm { color: var(--muted); }
+
+.ext-report dl.meta, .ext-check ul { margin: 6px 0; }
+.ext-report { margin: 8px 0; }
+.ok-line { color: var(--ok, #2e9d5b); }
+.ext-match input[type=text] { flex: 1 1 200px; min-width: 0; }

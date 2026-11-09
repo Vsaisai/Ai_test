@@ -21,7 +21,8 @@ export const DEFAULTS = {
   updatePolicy: 'smart',  // smart: small updates automatically, ask before a full re-download
                           // auto: everything automatically | manual: only from Settings
   platform: 'any',        // any | pc | phone — where the game should be playable
-  translate: true,        // VN pages: descriptions and tags in Russian (machine translation, cached)
+  translate: true,
+  f95: false,             // F95Zone catalog (only with adultTags)        // VN pages: descriptions and tags in Russian (machine translation, cached)
   lastUpdateCheck: 0,
   lastAppCheck: 0,
 };
