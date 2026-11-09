@@ -25,5 +25,11 @@ pub mod sync;
 pub mod tagtree;
 pub mod translate;
 
+/// Release version from the `VERSION` file: `A.B.C` or `A.B.C.D` for small fixes
+/// (Cargo's own version only takes three parts).
+pub fn app_version() -> &'static str {
+    include_str!("../../../VERSION").trim()
+}
+
 pub use catalog::Catalog;
 pub use search::{search, SearchRequest, SearchResponse};

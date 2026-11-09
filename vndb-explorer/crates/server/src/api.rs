@@ -268,7 +268,7 @@ impl AppState {
             sources: RwLock::new(Sources::load(&data_dir)?),
             updates: Mutex::new(None),
             http: reqwest::Client::builder()
-                .user_agent(vndb_core::http::USER_AGENT)
+                .user_agent(vndb_core::http::user_agent())
                 .timeout(std::time::Duration::from_secs(30))
                 .build()?,
             data_dir,
@@ -436,7 +436,7 @@ async fn status(State(s): St) -> Json<Value> {
         "lang_split": cat.as_ref().map(|c| c.lang_split),
         "imported_at": cat.as_ref().map(|c| c.imported_at.clone()),
         "import": imp,
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": vndb_core::app_version(),
     }))
 }
 
