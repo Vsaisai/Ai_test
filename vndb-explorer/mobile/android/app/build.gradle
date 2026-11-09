@@ -2,10 +2,14 @@ plugins {
     id 'com.android.application'
 }
 
-// Version comes from the git tag in CI (mobile-v1.2.3 -> 1.2.3), see mobile/build-apk.sh
+// Version comes from mobile/VERSION or the git tag in CI (mobile-v1.2.3[.4] -> 1.2.3[.4]), see mobile/build-apk.sh.
+// A.B.C.D -> versionCode A*1000000 + B*10000 + C*100 + D, so 0.4.7 -> 40700 and the small fix 0.4.7.1 -> 40701.
 def appVersion = System.getenv('VNSHELF_VERSION') ?: '0.3.0'
 def parts = appVersion.tokenize('.').collect { it.replaceAll('[^0-9]', '') ?: '0' }.collect { it as int }
-def code = parts[0] * 10000 + (parts.size() > 1 ? parts[1] : 0) * 100 + (parts.size() > 2 ? parts[2] : 0)
+if (parts.size() > 4 || parts.drop(1).any { it > 99 }) {
+    throw new GradleException("Version $appVersion: use A.B.C or A.B.C.D with B, C and D from 0 to 99")
+}
+def code = (parts + [0, 0, 0]).take(4).inject(0) { acc, p -> acc * 100 + p }
 
 android {
     namespace 'ru.vnshelf.app'

@@ -104,22 +104,30 @@ async function buildPanel(st, { inline }) {
   let renderLangs = () => {};
   api.langs().then(r => {
     const all = r.langs;
-    let expanded = st.langs.some(l => !all.slice(0, 12).some(x => x.lang === l));
+    // each tab lists only languages that really have such a way: ready releases, patches, or any
+    const inTab = x => (st.lsrc === 'patch' ? x.patch : st.lsrc === 'any' || !split ? x.vns : x.ready);
+    const pool = () => all.filter(x => inTab(x) > 0).sort((a, b) => inTab(b) - inTab(a));
+    let expanded = false;
     const hint = h('p', { class: 'muted small' });
     const paintHint = () => { hint.textContent = st.langs.length ? `Выбрано языков: ${st.langs.length}` : 'Ничего не выбрано — показываются новеллы, которые есть не только на японском.'; };
     const chips = h('div', { class: 'choice' });
     const render = () => {
-      const list = expanded ? all : all.slice(0, 12);
-      chips.replaceChildren(...list.map(({ lang, vns, ready, patch }) => h('button', {
-        type: 'button', class: st.langs.includes(lang) ? 'on' : '',
-        onclick: e => { st.langs = st.langs.includes(lang) ? st.langs.filter(x => x !== lang) : [...st.langs, lang]; e.currentTarget.classList.toggle('on'); paintHint(); count(); },
-      }, langName(lang), h('small', { class: 'muted' }, ` ${(st.lsrc === 'patch' ? patch : st.lsrc === 'any' || !split ? vns : ready).toLocaleString('ru')}`))),
-      all.length > 12 ? h('button', { type: 'button', class: 'more', onclick: () => { expanded = !expanded; render(); } }, expanded ? 'Свернуть' : `Ещё ${all.length - 12}…`) : null);
+      const avail = pool();
+      const before = st.langs.length;
+      st.langs = st.langs.filter(l => avail.some(x => x.lang === l));
+      if (st.langs.length !== before) { paintHint(); count(); }
+      if (st.langs.some(l => !avail.slice(0, 12).some(x => x.lang === l))) expanded = true;
+      const list = expanded ? avail : avail.slice(0, 12);
+      chips.replaceChildren(...list.map(x => h('button', {
+        type: 'button', class: st.langs.includes(x.lang) ? 'on' : '',
+        onclick: e => { st.langs = st.langs.includes(x.lang) ? st.langs.filter(l => l !== x.lang) : [...st.langs, x.lang]; e.currentTarget.classList.toggle('on'); paintHint(); count(); },
+      }, langName(x.lang), h('small', { class: 'muted' }, ` ${inTab(x).toLocaleString('ru')}`))),
+      avail.length > 12 ? h('button', { type: 'button', class: 'more', onclick: () => { expanded = !expanded; render(); } }, expanded ? 'Свернуть' : `Ещё ${avail.length - 12}…`) : null);
     };
     render(); paintHint();
     renderLangs = render;
     langBox.replaceChildren(h('div', { class: 'toolbar' },
-      h('button', { class: 'btn', type: 'button', onclick: () => { st.langs = all.map(x => x.lang); expanded = true; render(); paintHint(); count(); } }, 'Выбрать все'),
+      h('button', { class: 'btn', type: 'button', onclick: () => { st.langs = pool().map(x => x.lang); expanded = true; render(); paintHint(); count(); } }, 'Выбрать все'),
       h('button', { class: 'btn', type: 'button', onclick: () => { st.langs = []; render(); paintHint(); count(); } }, 'Снять все')), chips, hint);
   }).catch(() => { langBox.replaceChildren(h('p', { class: 'muted small' }, 'Список языков недоступен.')); });
 

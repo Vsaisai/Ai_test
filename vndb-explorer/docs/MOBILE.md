@@ -27,7 +27,7 @@ ANDROID_HOME=~/Android/Sdk ANDROID_NDK_HOME=~/Android/Sdk/ndk/27.2.12479018 ./mo
 
 ### Выпуск новой версии
 
-Поменяйте номер в `mobile/VERSION` и запушьте ветку `mobile`. Workflow `.github/workflows/android.yml`
+Поменяйте номер в `mobile/VERSION` (`A.B.C` или `A.B.C.D` для мелкой правки, части 0–99) и запушьте ветку `mobile`. Workflow `.github/workflows/android.yml`
 соберёт APK и, если релиза `mobile-v<версия>` ещё нет, создаст его (вместе с тегом). Пуш тега
 `mobile-v*` тоже запускает сборку. По умолчанию APK подписывается
 отладочным ключом из репозитория (`mobile/android/app/debug.keystore`), чтобы обновления ставились

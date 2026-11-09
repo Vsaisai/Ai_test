@@ -3,15 +3,16 @@
 use anyhow::Result;
 use std::time::Duration;
 
-pub const USER_AGENT: &str = concat!(
-    "vndb-explorer/",
-    env!("CARGO_PKG_VERSION"),
-    " (+https://github.com/Vsaisai/Ai_test)"
-);
+pub fn user_agent() -> String {
+    format!(
+        "vndb-explorer/{} (+https://github.com/Vsaisai/Ai_test)",
+        crate::app_version()
+    )
+}
 
 pub fn blocking_client(timeout: Option<Duration>) -> Result<reqwest::blocking::Client> {
     Ok(reqwest::blocking::Client::builder()
-        .user_agent(USER_AGENT)
+        .user_agent(user_agent())
         .timeout(timeout)
         .build()?)
 }

@@ -120,12 +120,30 @@ export function card(it, opts = {}) {
   );
 }
 
-/** Russian name of a language code (Intl knows them all; the code as a fallback). */
+/** Russian names of every VNDB language code. Android WebView ships trimmed ICU data, so Intl alone shows bare codes. */
+const LANG_RU = {
+  ja: 'Японский', en: 'Английский', ru: 'Русский', zh: 'Китайский', 'zh-Hans': 'Китайский (упрощённый)',
+  'zh-Hant': 'Китайский (традиционный)', ko: 'Корейский', es: 'Испанский', fr: 'Французский', de: 'Немецкий',
+  it: 'Итальянский', 'pt-br': 'Португальский (Бразилия)', 'pt-pt': 'Португальский (Португалия)', id: 'Индонезийский',
+  uk: 'Украинский', vi: 'Вьетнамский', pl: 'Польский', tr: 'Турецкий', th: 'Тайский', nl: 'Нидерландский',
+  sv: 'Шведский', cs: 'Чешский', ar: 'Арабский', fi: 'Финский', no: 'Норвежский', hu: 'Венгерский', bg: 'Болгарский',
+  ro: 'Румынский', da: 'Датский', el: 'Греческий', ms: 'Малайский', ca: 'Каталанский', hi: 'Хинди', ta: 'Тамильский',
+  lv: 'Латышский', ga: 'Ирландский', eu: 'Баскский', gl: 'Галисийский', fa: 'Персидский', et: 'Эстонский',
+  sk: 'Словацкий', he: 'Иврит', kk: 'Казахский', la: 'Латынь', be: 'Белорусский', gd: 'Шотландский (гэльский)',
+  eo: 'Эсперанто', sl: 'Словенский', hr: 'Хорватский', sr: 'Сербский', mk: 'Македонский', lt: 'Литовский',
+  bs: 'Боснийский', ur: 'Урду', iu: 'Инуктитут', ck: 'Чероки', tl: 'Тагальский', ne: 'Непальский', mn: 'Монгольский',
+  hy: 'Армянский', ka: 'Грузинский', az: 'Азербайджанский', uz: 'Узбекский', bn: 'Бенгальский', sq: 'Албанский',
+  is: 'Исландский',
+};
+
+/** Russian name of a language code: our table, then Intl, never a bare code. */
 let langNames = null;
 export function langName(code) {
-  try { langNames ||= new Intl.DisplayNames(['ru'], { type: 'language' }); } catch { langNames = false; }
-  const n = langNames ? langNames.of(code) : null;
-  return n && n.toLowerCase() !== code.toLowerCase() ? n[0].toUpperCase() + n.slice(1) : (LANG_NAMES[code] || code.toUpperCase());
+  if (LANG_RU[code]) return LANG_RU[code];
+  try { langNames ??= new Intl.DisplayNames(['ru'], { type: 'language' }); } catch { langNames = false; }
+  let n = null;
+  try { n = langNames ? langNames.of(code) : null; } catch { /* invalid code */ }
+  return n && n.toLowerCase() !== code.toLowerCase() ? n[0].toUpperCase() + n.slice(1) : `Другой язык (${code})`;
 }
 
 export function spinner(text = 'Загрузка…') {
