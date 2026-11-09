@@ -25,6 +25,10 @@ pub const ID: &str = "f95zone";
 pub const HOST: &str = "https://f95zone.to";
 pub const MIN_GAP: Duration = Duration::from_secs(2);
 pub const PER_PAGE: u32 = 90;
+/// Longest description kept (the overview of a game is normally far shorter).
+pub const DESCRIPTION_MAX: usize = 20_000;
+/// The Games forum: its thread list is the site's own index of every game.
+pub const GAMES_FORUM: &str = "/forums/games.2/";
 
 /// Snapshot of the public tag ids, used when the live dictionary cannot be read.
 const FALLBACK_TAGS: &str = include_str!("../../assets/f95_tags.json");
@@ -165,6 +169,13 @@ impl Provider for F95Zone {
         let url = Self::list_url(page).replacen(HOST, &self.base, 1);
         let body = self.get(&url)?;
         parse_list(&body, &self.tags, &self.prefixes)
+    }
+
+    fn index_page(&mut self, page: u32) -> Result<super::IndexPage, ProviderError> {
+        // /forums/games.2/page-N (robots.txt allows it; only addresses with "?" are disallowed)
+        let url = format!("{}{GAMES_FORUM}page-{page}", self.base);
+        let body = self.get(&url)?;
+        parse_forum_page(&body)
     }
 
     fn details(&mut self, ext_id: &str) -> Result<ExtGame, ProviderError> {
@@ -328,8 +339,10 @@ pub fn parse_list(
         .and_then(Value::as_array)
         .ok_or_else(|| ProviderError::Parse("нет списка игр".into()))?;
     let mut games = Vec::new();
+    let mut bad_items = 0;
     for it in data {
         let Some(id) = it.get("thread_id").and_then(num) else {
+            bad_items += 1;
             continue;
         };
         let str_of = |k: &str| {
@@ -394,7 +407,326 @@ pub fn parse_list(
         .and_then(|p| p.get("total"))
         .and_then(num)
         .map(|t| t as u32);
-    Ok(ListPage { games, total_pages })
+    Ok(ListPage {
+        games,
+        total_pages,
+        bad_items,
+    })
+}
+
+// ---------- live check ----------
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct CheckStep {
+    pub name: String,
+    pub ok: bool,
+    pub details: Vec<String>,
+}
+
+/// A short, polite test against the real site: about 4 + `games` requests, 2 s apart.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct LiveCheck {
+    pub steps: Vec<CheckStep>,
+    /// Releases in the feed, counted from its first and last page
+    pub feed_releases: Option<usize>,
+    /// Threads in the Games forum list, counted the same way (pinned ones left out)
+    pub forum_threads: Option<usize>,
+    pub ok: bool,
+    pub stopped: Option<String>,
+    pub at: String,
+}
+
+/// Exact size of a paged list from its first and last page.
+fn size(per_page: usize, last_page: u32, on_last: usize) -> usize {
+    per_page * (last_page.saturating_sub(1) as usize) + on_last
+}
+
+pub fn live_check(
+    conn: &rusqlite::Connection,
+    games: usize,
+    log: &dyn Fn(&str),
+) -> anyhow::Result<LiveCheck> {
+    let mut p = F95Zone::new();
+    let mut out = LiveCheck {
+        at: super::store::stamp(),
+        ..Default::default()
+    };
+    let step = |out: &mut LiveCheck, name: &str, ok: bool, details: Vec<String>| {
+        log(&format!(
+            "{} {name}: {}",
+            if ok { "✓" } else { "✗" },
+            details.join("; ")
+        ));
+        out.steps.push(CheckStep {
+            name: name.into(),
+            ok,
+            details,
+        });
+    };
+    let stop = |out: &mut LiveCheck, e: &ProviderError| -> bool {
+        if let ProviderError::Blocked(_) = e {
+            out.stopped = Some(e.to_string());
+            return true;
+        }
+        false
+    };
+    // 1. dictionaries
+    match p.load_dictionaries() {
+        Ok(()) => step(
+            &mut out,
+            "Словарь тегов",
+            true,
+            vec![
+                format!(
+                    "источник: {}",
+                    if p.dictionary == "site" {
+                        "сайт"
+                    } else {
+                        "встроенный снимок"
+                    }
+                ),
+                format!("тегов: {}, префиксов: {}", p.tags.len(), p.prefixes.len()),
+            ],
+        ),
+        Err(e) => {
+            let fatal = stop(&mut out, &e);
+            step(
+                &mut out,
+                "Словарь тегов",
+                false,
+                vec![e.to_string(), "используется встроенный снимок тегов".into()],
+            );
+            if fatal {
+                return finish(conn, out);
+            }
+        }
+    }
+    // 2-3. the feed: first and last page give its exact size
+    let mut sample: Vec<ExtGame> = Vec::new();
+    match p.list(1) {
+        Ok(first) => {
+            let total = first.total_pages.unwrap_or(1);
+            let mut d = vec![
+                format!("игр на странице: {}, страниц: {}", first.games.len(), total),
+                format!(
+                    "с тегами: {}, со статусом: {}, нечитаемых записей: {}",
+                    first.games.iter().filter(|g| !g.tags.is_empty()).count(),
+                    first.games.iter().filter(|g| !g.status.is_empty()).count(),
+                    first.bad_items
+                ),
+            ];
+            d.extend(
+                first
+                    .games
+                    .iter()
+                    .take(3)
+                    .map(|g| format!("«{}» — {}, {} тегов", g.title, g.developer, g.tags.len())),
+            );
+            let ok = !first.games.is_empty() && first.games.iter().any(|g| !g.tags.is_empty());
+            step(&mut out, "Лента: первая страница", ok, d);
+            for g in &first.games {
+                super::store::upsert_listed(conn, g, "feed")?;
+            }
+            sample = first.games.clone();
+            if total > 1 {
+                match p.list(total) {
+                    Ok(last) => {
+                        // the page size the site really uses, not the one asked for
+                        let n = size(first.games.len(), total, last.games.len());
+                        out.feed_releases = Some(n);
+                        step(
+                            &mut out,
+                            "Лента: последняя страница",
+                            true,
+                            vec![format!(
+                                "на последней странице {}, всего в ленте {n}",
+                                last.games.len()
+                            )],
+                        );
+                    }
+                    Err(e) => {
+                        let fatal = stop(&mut out, &e);
+                        step(
+                            &mut out,
+                            "Лента: последняя страница",
+                            false,
+                            vec![e.to_string()],
+                        );
+                        if fatal {
+                            return finish(conn, out);
+                        }
+                    }
+                }
+            } else {
+                out.feed_releases = Some(first.games.len());
+            }
+        }
+        Err(e) => {
+            let fatal = stop(&mut out, &e);
+            step(
+                &mut out,
+                "Лента: первая страница",
+                false,
+                vec![e.to_string()],
+            );
+            if fatal {
+                return finish(conn, out);
+            }
+        }
+    }
+    // 4-5. the Games forum list: the site's own index of every game thread
+    match p.index_page(1) {
+        Ok(first) => {
+            let per = first.games.len();
+            let last_page = first.last_page.unwrap_or(1);
+            let mut d = vec![format!(
+                "тем на странице: {per} (+ закреплённых служебных: {}), страниц: {last_page}",
+                first.service
+            )];
+            d.extend(first.games.iter().take(3).map(|g| {
+                format!(
+                    "«{}» — {}",
+                    g.title,
+                    if g.developer.is_empty() {
+                        "разработчик не указан"
+                    } else {
+                        &g.developer
+                    }
+                )
+            }));
+            step(&mut out, "Форум Games: первая страница", per > 0, d);
+            if last_page > 1 && per > 0 {
+                match p.index_page(last_page) {
+                    Ok(last) => {
+                        let n = size(per, last_page, last.games.len());
+                        out.forum_threads = Some(n);
+                        step(
+                            &mut out,
+                            "Форум Games: последняя страница",
+                            true,
+                            vec![format!(
+                                "на последней странице {}, всего тем ≈ {n}",
+                                last.games.len()
+                            )],
+                        );
+                    }
+                    Err(e) => {
+                        let fatal = stop(&mut out, &e);
+                        step(
+                            &mut out,
+                            "Форум Games: последняя страница",
+                            false,
+                            vec![e.to_string()],
+                        );
+                        if fatal {
+                            return finish(conn, out);
+                        }
+                    }
+                }
+            } else {
+                out.forum_threads = Some(per);
+            }
+        }
+        Err(e) => {
+            let fatal = stop(&mut out, &e);
+            step(
+                &mut out,
+                "Форум Games: первая страница",
+                false,
+                vec![e.to_string()],
+            );
+            if fatal {
+                return finish(conn, out);
+            }
+        }
+    }
+    if let (Some(f), Some(t)) = (out.feed_releases, out.forum_threads) {
+        let diff = t as i64 - f as i64;
+        step(
+            &mut out,
+            "Сравнение ленты и форума",
+            diff <= 0,
+            vec![
+                format!("в ленте {f}, в форуме {t}"),
+                if diff > 0 {
+                    format!("в форуме на {diff} тем больше: лента неполная, нужна сверка с форумом")
+                } else {
+                    "в ленте не меньше тем, чем в форуме".into()
+                },
+            ],
+        );
+    }
+    // 6. a few game pages
+    for g in sample.iter().take(games) {
+        match p.details(&g.ext_id) {
+            Ok(d) => {
+                let change = super::store::save_details(conn, &d)?;
+                let ok = !d.title.is_empty() && !d.tags.is_empty() && d.description.is_some();
+                step(
+                    &mut out,
+                    &format!("Страница игры {}", g.ext_id),
+                    ok,
+                    vec![
+                        format!(
+                            "«{}», разработчик: {}",
+                            d.title,
+                            if d.developer.is_empty() {
+                                "—"
+                            } else {
+                                &d.developer
+                            }
+                        ),
+                        format!(
+                            "тегов: {}, описание: {} знаков, обложка: {}",
+                            d.tags.len(),
+                            d.description.as_ref().map_or(0, |x| x.chars().count()),
+                            if d.cover.is_some() {
+                                "есть"
+                            } else {
+                                "нет"
+                            }
+                        ),
+                        format!(
+                            "официальные ссылки: {}",
+                            if d.links.is_empty() {
+                                "нет".to_string()
+                            } else {
+                                d.links
+                                    .iter()
+                                    .map(|l| l.site.clone())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            }
+                        ),
+                        if let super::store::Change::Hidden(r) = change {
+                            format!("скрыта правилами ({r})")
+                        } else {
+                            "сохранена".into()
+                        },
+                    ],
+                );
+            }
+            Err(e) => {
+                let fatal = stop(&mut out, &e);
+                step(
+                    &mut out,
+                    &format!("Страница игры {}", g.ext_id),
+                    false,
+                    vec![e.to_string()],
+                );
+                if fatal {
+                    break;
+                }
+            }
+        }
+    }
+    finish(conn, out)
+}
+
+fn finish(conn: &rusqlite::Connection, mut out: LiveCheck) -> anyhow::Result<LiveCheck> {
+    out.ok = out.stopped.is_none() && !out.steps.is_empty() && out.steps.iter().all(|s| s.ok);
+    super::store::set_meta(conn, ID, "last_check", &serde_json::to_string(&out)?)?;
+    Ok(out)
 }
 
 // ---------- the game page (HTML) ----------
@@ -558,8 +890,9 @@ fn overview(text: &str) -> Option<String> {
     if s.is_empty() {
         return None;
     }
-    // a short excerpt with a link to the original (robots.txt: search = links + excerpts)
-    Some(excerpt(&s, 1200))
+    // the whole public overview, read only when the user opens the game (like a browser);
+    // a safety limit against pages that swallow the rest of the post
+    Some(excerpt(&s, DESCRIPTION_MAX))
 }
 
 fn excerpt(s: &str, max: usize) -> String {
@@ -588,6 +921,130 @@ fn download_section(body_lower: &str) -> usize {
     .filter_map(|m| body_lower.find(m))
     .min()
     .unwrap_or(body_lower.len())
+}
+
+/// Split "Name [v0.5] [Developer]" into name and bracket parts.
+fn split_title(t: &str) -> (String, Vec<String>) {
+    let mut brackets: Vec<String> = Vec::new();
+    let mut name = t.trim().to_string();
+    while name.ends_with(']') {
+        let Some(i) = name.rfind('[') else { break };
+        brackets.insert(0, name[i + 1..name.len() - 1].trim().to_string());
+        name = name[..i].trim().to_string();
+    }
+    (name, brackets)
+}
+
+/// Prefix labels inside an HTML fragment: `<span class="label ...">Completed</span>`.
+fn labels(html: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = html;
+    while let Some(i) = rest.find("<span class=\"label") {
+        let Some(gt) = rest[i..].find('>') else { break };
+        let s = i + gt + 1;
+        let Some(e) = rest[s..].find("</span>") else {
+            break;
+        };
+        out.push(html_text(&rest[s..s + e]));
+        rest = &rest[s + e..];
+    }
+    out
+}
+
+/// One page of the Games forum thread list (XenForo): thread id, title with prefixes.
+/// Pinned threads (rules, announcements) are counted as service threads and left out.
+pub fn parse_forum_page(html: &str) -> Result<super::IndexPage, ProviderError> {
+    check_response(200, html)?;
+    let mut out = super::IndexPage::default();
+    // page numbers of the pager: the largest one is the last page
+    let marker = format!("{GAMES_FORUM}page-");
+    let mut from = 0;
+    while let Some(i) = html[from..].find(&marker) {
+        let s = from + i + marker.len();
+        let n: String = html[s..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if let Ok(n) = n.parse::<u32>() {
+            out.last_page = Some(out.last_page.map_or(n, |m| m.max(n)));
+        }
+        from = s;
+    }
+    let sticky_end = html
+        .find("structItemContainer-group--sticky")
+        .and_then(|i| {
+            html[i + 10..]
+                .find("structItemContainer-group")
+                .map(|j| i + 10 + j)
+        });
+    const ITEM: &str = "js-threadListItem-";
+    let starts: Vec<usize> = html.match_indices(ITEM).map(|(i, _)| i).collect();
+    if starts.is_empty() && !html.contains("structItemContainer") {
+        return Err(ProviderError::Parse("нет списка тем".into()));
+    }
+    for (k, &i) in starts.iter().enumerate() {
+        let end = starts.get(k + 1).copied().unwrap_or(html.len());
+        let item = &html[i..end];
+        let id: String = item[ITEM.len()..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if id.is_empty() {
+            continue;
+        }
+        let sticky = sticky_end.is_some_and(|e| i < e) || item.contains("structItem--sticky");
+        if sticky {
+            out.service += 1;
+            continue;
+        }
+        // the thread link inside the title block
+        let title_html = item
+            .find("structItem-title")
+            .map(|t| &item[t..])
+            .and_then(|t| t.find("</div>").map(|e| &t[..e]))
+            .unwrap_or(item);
+        let link = title_html
+            .match_indices("href=\"/threads/")
+            .last()
+            .map(|(j, _)| j)
+            .and_then(|j| {
+                let a = &title_html[j..];
+                let g = a.find('>')?;
+                let e = a[g..].find("</a>")?;
+                Some(html_text(&a[g + 1..g + e]))
+            })
+            .unwrap_or_default();
+        let (name, brackets) = split_title(&link);
+        let mut status = "ongoing".to_string();
+        let mut engine = String::new();
+        for l in labels(title_html) {
+            if let Some(s) = status_of(&l) {
+                status = s.into();
+            } else if let Some(e) = engine_of(&l) {
+                engine = e.into();
+            }
+        }
+        out.games.push(ExtGame {
+            source: ID.into(),
+            ext_id: id.clone(),
+            title: name,
+            developer: if brackets.len() >= 2 {
+                brackets.last().cloned().unwrap_or_default()
+            } else {
+                String::new()
+            },
+            version: brackets
+                .first()
+                .cloned()
+                .filter(|_| brackets.len() >= 2)
+                .unwrap_or_default(),
+            status,
+            engine,
+            page_url: F95Zone::thread_url(&id),
+            ..Default::default()
+        });
+    }
+    Ok(out)
 }
 
 /// The public game page: title, prefixes, tags, first post (description, developer links).
@@ -619,13 +1076,7 @@ pub fn parse_thread(html: &str, id: &str) -> Result<ExtGame, ProviderError> {
     }
     let title_text = title_text.replace('\n', " ");
     // "Name [v0.5] [Developer]"
-    let mut brackets: Vec<String> = Vec::new();
-    let mut name = title_text.trim().to_string();
-    while name.ends_with(']') {
-        let Some(i) = name.rfind('[') else { break };
-        brackets.insert(0, name[i + 1..name.len() - 1].trim().to_string());
-        name = name[..i].trim().to_string();
-    }
+    let (name, brackets) = split_title(&title_text);
     let mut status = "ongoing".to_string();
     let mut engine = String::new();
     for l in &labels {
@@ -862,6 +1313,77 @@ mod tests {
             parse_thread("<html><title>Log in | F95zone</title></html>", "1"),
             Err(ProviderError::Blocked(_))
         ));
+    }
+
+    const FORUM: &str = r#"<html><body>
+      <div class="structItemContainer-group structItemContainer-group--sticky">
+        <div class="structItem structItem--thread js-inlineModContainer js-threadListItem-5"><div class="structItem-title">
+          <a href="/threads/f95zone-games-rules.5/">F95Zone Games Rules</a></div></div>
+      </div>
+      <div class="structItemContainer-group js-threadList">
+        <div class="structItem structItem--thread js-inlineModContainer js-threadListItem-319968"><div class="structItem-title">
+          <a href="/forums/games.2/?prefix_id=7" class="labelLink" rel="nofollow"><span class="label label--gray" dir="auto">Ren'Py</span></a>
+          <a href="/threads/la-previa.319968/" data-tp-primary="on">La Previa [v1.3] [rioplatagames]</a></div></div>
+        <div class="structItem structItem--thread js-inlineModContainer js-threadListItem-1000"><div class="structItem-title">
+          <a href="/forums/games.2/?prefix_id=18" class="labelLink"><span class="label label--blue">Completed</span></a>
+          <a href="/forums/games.2/?prefix_id=3" class="labelLink"><span class="label label--gray">Unity</span></a>
+          <a href="/threads/old-gold.1000/">Old &amp; Gold [Final] [Dev Team]</a></div></div>
+        <div class="structItem structItem--thread js-inlineModContainer js-threadListItem-1001"><div class="structItem-title">
+          <a href="/threads/no-brackets.1001/">No Brackets</a></div></div>
+      </div>
+      <ul class="pageNav-main"><li><a href="/forums/games.2/page-2">2</a></li><li><a href="/forums/games.2/page-987">987</a></li></ul>
+    </body></html>"#;
+
+    #[test]
+    fn forum_list() {
+        let p = parse_forum_page(FORUM).unwrap();
+        assert_eq!(p.last_page, Some(987));
+        assert_eq!(p.service, 1);
+        let ids: Vec<&str> = p.games.iter().map(|g| g.ext_id.as_str()).collect();
+        assert_eq!(ids, vec!["319968", "1000", "1001"]);
+        let g = &p.games[0];
+        assert_eq!(
+            (g.title.as_str(), g.version.as_str(), g.developer.as_str()),
+            ("La Previa", "v1.3", "rioplatagames")
+        );
+        assert_eq!(
+            (g.status.as_str(), g.engine.as_str()),
+            ("ongoing", "Ren'Py")
+        );
+        let o = &p.games[1];
+        assert_eq!(
+            (
+                o.title.as_str(),
+                o.developer.as_str(),
+                o.status.as_str(),
+                o.engine.as_str()
+            ),
+            ("Old & Gold", "Dev Team", "completed", "Unity")
+        );
+        assert_eq!(
+            (p.games[2].title.as_str(), p.games[2].developer.as_str()),
+            ("No Brackets", "")
+        );
+        assert!(matches!(
+            parse_forum_page("<html><title>Just a moment...</title></html>"),
+            Err(ProviderError::Blocked(_))
+        ));
+        assert!(parse_forum_page("<html>nothing</html>").is_err());
+    }
+
+    #[test]
+    fn whole_description_is_kept() {
+        let long: String = (0..400)
+            .map(|i| format!("Sentence number {i} of the story. "))
+            .collect();
+        let page = THREAD.replace(
+            "A quiet town &amp; one long summer.<br />Make choices that matter.",
+            &long,
+        );
+        let g = parse_thread(&page, "1").unwrap();
+        let d = g.description.unwrap();
+        assert!(d.chars().count() > 10_000, "{}", d.len());
+        assert!(d.ends_with("story."));
     }
 
     #[test]

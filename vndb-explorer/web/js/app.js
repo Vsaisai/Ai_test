@@ -124,7 +124,7 @@ async function watchJob(doneText) {
     // the data changed: redraw the current page by itself instead of asking to reload
     api.resetTags();
     route();
-    const text = doneText || ({ import: '✅ База VNDB загружена.', sync: '✅ Новые новеллы и релизы добавлены.', sources: '✅ Каталоги переводов обновлены.', external: '✅ Каталог F95Zone обновлён.' })[job.kind] || '✅ Готово.';
+    const text = doneText || ({ import: '✅ База VNDB загружена.', sync: '✅ Новые новеллы и релизы добавлены.', sources: '✅ Каталоги переводов обновлены.', external: '✅ Каталог F95Zone обновлён.', 'external-audit': '✅ Сверка с форумом F95Zone закончена.', 'external-check': '✅ Проверка F95Zone закончена.' })[job.kind] || '✅ Готово.';
     showBanner(text);
     const shown = banner.textContent;
     setTimeout(() => { if (banner.textContent === shown) banner.hidden = true; }, 6000);

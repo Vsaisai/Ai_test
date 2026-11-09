@@ -569,3 +569,8 @@ html:not(.touch-nav) { --card-w: 170px; }
 .qm button:hover, .qm button:focus-visible { background: var(--panel-2); }
 .qm button.on { font-weight: 700; color: var(--accent); }
 .qm button.rm { color: var(--muted); }
+
+.ext-report dl.meta, .ext-check ul { margin: 6px 0; }
+.ext-report { margin: 8px 0; }
+.ok-line { color: var(--ok, #2e9d5b); }
+.ext-match input[type=text] { flex: 1 1 200px; min-width: 0; }
