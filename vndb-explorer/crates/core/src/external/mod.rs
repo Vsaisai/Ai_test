@@ -211,7 +211,19 @@ fn with_retry<T>(
     let mut tries = 0;
     let mut waits = 0;
     loop {
-        match f(provider) {
+        // a bug while reading one page must not end the whole run: it counts as that page's error
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut *provider)))
+            .unwrap_or_else(|p| {
+                let msg = p
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
+                    .unwrap_or_default();
+                Err(ProviderError::Parse(format!(
+                    "ошибка разбора страницы: {msg}"
+                )))
+            });
+        match res {
             // the site asked to slow down: wait as long as it said, then go on twice as slowly
             Err(ProviderError::RateLimited { wait_secs }) if waits < MAX_RATE_WAITS => {
                 waits += 1;
@@ -464,7 +476,10 @@ pub fn refresh(
 
 /// What the comparison with the site's own index found.
 #[derive(Debug, Clone, Default, Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct AuditReport {
+    /// An interrupted comparison continued from this page (counts include the earlier part)
+    pub resumed_from: Option<u32>,
     pub pages_total: Option<u32>,
     pub pages_read: u32,
     pub pages_failed: Vec<u32>,
@@ -508,6 +523,24 @@ pub fn audit(
     let known = store::all_ids(conn, src)?;
     let mut seen = std::collections::HashSet::new();
     let mut page = 1;
+    // an interrupted comparison continues where it stopped, with the counts it had
+    let mut earlier_threads = 0;
+    if let Some((p, r)) = store::get_meta(conn, src, "audit_resume")?
+        .and_then(|j| serde_json::from_str::<(u32, AuditReport)>(&j).ok())
+    {
+        if p > 1 {
+            log(&format!("{name}: продолжаю сверку со страницы {p}"));
+            earlier_threads = r.index_threads;
+            rep = AuditReport {
+                resumed_from: Some(p),
+                started_at: r.started_at.clone(),
+                stopped: None,
+                complete: false,
+                ..r
+            };
+            page = p;
+        }
+    }
     while page <= max_pages {
         let idx = match with_retry(provider, log, |p| p.index_page(page)) {
             Ok(i) => i,
@@ -544,8 +577,14 @@ pub fn audit(
             }
         }
         tx.commit()?;
-        rep.index_threads = seen.len();
+        rep.index_threads = earlier_threads + seen.len();
         progress(page as u64, rep.pages_total.map(u64::from));
+        store::set_meta(
+            conn,
+            src,
+            "audit_resume",
+            &serde_json::to_string(&(page + 1, &rep))?,
+        )?;
         log(&format!(
             "{name}: список тем, страница {page}{} — тем {}, нет в каталоге {}",
             rep.pages_total
@@ -555,10 +594,34 @@ pub fn audit(
             rep.missing_added
         ));
         if idx.games.is_empty() || rep.pages_total.is_some_and(|t| page >= t) {
+            // pages that failed get one more chance
+            for fp in std::mem::take(&mut rep.pages_failed) {
+                match with_retry(provider, log, |p| p.index_page(fp)) {
+                    Ok(i) => {
+                        rep.pages_read += 1;
+                        rep.errors = rep.errors.saturating_sub(1);
+                        let tx = conn.unchecked_transaction()?;
+                        for g in &i.games {
+                            if seen.insert(g.ext_id.clone()) && !known.contains(&g.ext_id) {
+                                match store::upsert_listed(&tx, g, "forum")? {
+                                    store::Change::Hidden(_) => rep.hidden_by_policy += 1,
+                                    _ => rep.missing_added += 1,
+                                }
+                            }
+                        }
+                        tx.commit()?;
+                        rep.index_threads = earlier_threads + seen.len();
+                    }
+                    Err(_) => rep.pages_failed.push(fp),
+                }
+            }
             rep.complete = rep.pages_failed.is_empty();
             break;
         }
         page += 1;
+    }
+    if rep.complete {
+        store::del_meta(conn, src, "audit_resume")?;
     }
     // read the pages of threads found only in the index, so their tags are known
     if rep.stopped.is_none() {
@@ -683,6 +746,7 @@ mod tests {
         /// page -> how many more times it answers "too many requests"
         limited: std::collections::HashMap<u32, u32>,
         paused: Vec<u64>,
+        index_limit_at: Option<u32>,
         calls: Vec<u32>,
         slowed: u32,
     }
@@ -697,6 +761,7 @@ mod tests {
                 flaky: Default::default(),
                 limited: Default::default(),
                 paused: Vec::new(),
+                index_limit_at: None,
                 calls: Vec::new(),
                 slowed: 0,
             }
@@ -746,11 +811,17 @@ mod tests {
             self.paused.push(secs);
         }
         fn details(&mut self, id: &str) -> Result<ExtGame, ProviderError> {
+            if id == "66" {
+                panic!("byte index 12 is not a char boundary");
+            }
             let mut g = game(id, "1", &["2dcg"]);
             g.description = Some("page".into());
             Ok(g)
         }
         fn index_page(&mut self, page: u32) -> Result<IndexPage, ProviderError> {
+            if self.index_limit_at == Some(page) {
+                return Err(ProviderError::Blocked("captcha".into()));
+            }
             Ok(IndexPage {
                 games: self
                     .index
@@ -923,6 +994,44 @@ mod tests {
         let r = refresh(&mut p, &conn, true, 5000, &|_| {}, &|_, _| {}).unwrap();
         assert_eq!(r.resumed_from, Some(2));
         assert!(r.complete);
+    }
+
+    #[test]
+    fn a_crash_on_one_page_is_an_error_not_the_end() {
+        let conn = store::open_memory();
+        let mut p = Fake::new(pages(1, 2));
+        refresh(&mut p, &conn, true, 5000, &|_| {}, &|_, _| {}).unwrap();
+        p.index = vec![vec![game("66", "1", &[]), game("67", "1", &[])]];
+        let r = audit(&mut p, &conn, 5000, 100, &|_| {}, &|_, _| {}).unwrap();
+        assert!(r.stopped.is_none());
+        assert_eq!((r.missing_added, r.checked, r.errors), (2, 1, 1));
+        assert!(store::get(&conn, "fake", "67").unwrap().is_some());
+    }
+
+    #[test]
+    fn interrupted_audit_resumes() {
+        let conn = store::open_memory();
+        let mut p = Fake::new(pages(1, 2));
+        refresh(&mut p, &conn, true, 5000, &|_| {}, &|_, _| {}).unwrap();
+        p.index = vec![
+            vec![game("1", "1", &[]), game("70", "1", &[])],
+            vec![game("71", "1", &[])],
+            vec![game("72", "1", &[])],
+        ];
+        // stopped on page 2
+        p.index_limit_at = Some(2);
+        let r = audit(&mut p, &conn, 5000, 100, &|_| {}, &|_, _| {}).unwrap();
+        assert!(r.stopped.is_some() && !r.complete);
+        assert_eq!(r.missing_added, 1);
+        // next time: from page 2, counts carried over
+        p.index_limit_at = None;
+        let r = audit(&mut p, &conn, 5000, 100, &|_| {}, &|_, _| {}).unwrap();
+        assert_eq!(r.resumed_from, Some(2));
+        assert!(r.complete, "{r:?}");
+        assert_eq!((r.index_threads, r.missing_added), (4, 3));
+        assert!(store::get_meta(&conn, "fake", "audit_resume")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
