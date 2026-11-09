@@ -118,7 +118,10 @@ impl F95Zone {
         let res = self.client()?.get(url).send();
         let res = res.map_err(|e| ProviderError::Unavailable(e.to_string()))?;
         let status = res.status().as_u16();
-        let body = res.text().unwrap_or_default();
+        // a connection cut while the body is read is a temporary failure, not an empty page
+        let body = res
+            .text()
+            .map_err(|e| ProviderError::Unavailable(format!("ответ оборвался: {e}")))?;
         check_response(status, &body)?;
         Ok(body)
     }
@@ -168,7 +171,22 @@ impl Provider for F95Zone {
     fn list(&mut self, page: u32) -> Result<ListPage, ProviderError> {
         let url = Self::list_url(page).replacen(HOST, &self.base, 1);
         let body = self.get(&url)?;
+        let t = body.trim_start();
+        if t.is_empty() {
+            return Err(ProviderError::Unavailable("пустой ответ".into()));
+        }
+        if t.starts_with('<') {
+            // an HTML page instead of the feed (maintenance, error page): temporary
+            return Err(ProviderError::Unavailable(
+                "вместо данных пришла страница сайта".into(),
+            ));
+        }
         parse_list(&body, &self.tags, &self.prefixes)
+    }
+
+    fn slow_down(&mut self) {
+        // twice as polite after a bad answer, up to one request in 8 seconds
+        self.min_gap = (self.min_gap * 2).min(Duration::from_secs(8));
     }
 
     fn index_page(&mut self, page: u32) -> Result<super::IndexPage, ProviderError> {

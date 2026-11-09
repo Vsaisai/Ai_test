@@ -110,6 +110,12 @@ pub trait Provider {
     fn list(&mut self, page: u32) -> Result<ListPage, ProviderError>;
     /// Full metadata of one game from its page (description, official links...).
     fn details(&mut self, ext_id: &str) -> Result<ExtGame, ProviderError>;
+    /// The site answered badly (empty page, timeout): ask less often for the rest of the run.
+    fn slow_down(&mut self) {}
+    /// Pause before a request is repeated.
+    fn retry_pause(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(10)
+    }
     /// One page (1-based) of an independent index of every game, if the site has one.
     fn index_page(&mut self, _page: u32) -> Result<IndexPage, ProviderError> {
         Err(ProviderError::Parse("нет независимого списка игр".into()))
@@ -152,14 +158,73 @@ pub struct RefreshReport {
 }
 
 /// Retry a failed request once after a pause; refusals by the site are never retried.
-fn with_retry<T>(mut f: impl FnMut() -> Result<T, ProviderError>) -> Result<T, ProviderError> {
-    match f() {
-        Err(ProviderError::Unavailable(_)) => {
-            std::thread::sleep(std::time::Duration::from_secs(5));
-            f()
+/// Repeat a request after a temporary failure (empty answer, timeout, server error): up to two
+/// more tries, with a pause, and the provider slows down for the rest of the run. Refusals by
+/// the site (rate limit, captcha, login) are never repeated.
+fn with_retry<T>(
+    provider: &mut dyn Provider,
+    log: &dyn Fn(&str),
+    mut f: impl FnMut(&mut dyn Provider) -> Result<T, ProviderError>,
+) -> Result<T, ProviderError> {
+    let mut tries = 0;
+    loop {
+        match f(provider) {
+            Err(ProviderError::Unavailable(m)) if tries < 2 => {
+                tries += 1;
+                provider.slow_down();
+                let pause = provider.retry_pause() * tries;
+                log(&format!(
+                    "{}: {m} — повтор через {} с",
+                    provider.name(),
+                    pause.as_secs()
+                ));
+                std::thread::sleep(pause);
+            }
+            other => return other,
         }
-        other => other,
     }
+}
+
+/// Save one page of the feed; returns how many releases are new or changed.
+fn ingest(
+    conn: &rusqlite::Connection,
+    games: &[ExtGame],
+    seen: &mut std::collections::HashSet<(String, String)>,
+    reread: bool,
+    rep: &mut RefreshReport,
+) -> anyhow::Result<usize> {
+    let mut changed = 0;
+    let tx = conn.unchecked_transaction()?;
+    for g in games {
+        let key = (g.source.clone(), g.ext_id.clone());
+        let again = !seen.insert(key);
+        if again && !reread {
+            // the feed moved while being read: the same release on two pages
+            rep.repeats += 1;
+            continue;
+        }
+        match store::upsert_listed(&tx, g, "feed")? {
+            // read again (end of a full pass, a retried page): only real changes count
+            store::Change::Unchanged | store::Change::Hidden(_) if again => {}
+            store::Change::New | store::Change::Updated if again => {
+                rep.updated += 1;
+                changed += 1;
+            }
+            store::Change::New => {
+                rep.new += 1;
+                changed += 1;
+            }
+            store::Change::Updated => {
+                rep.updated += 1;
+                changed += 1;
+            }
+            store::Change::Unchanged => rep.unchanged += 1,
+            store::Change::Hidden(_) => rep.hidden_by_policy += 1,
+        }
+    }
+    tx.commit()?;
+    rep.discovered = seen.len();
+    Ok(changed)
 }
 
 /// Read the provider's feed, newest updates first.
@@ -176,6 +241,7 @@ pub fn refresh(
     full: bool,
     max_pages: u32,
     log: &dyn Fn(&str),
+    progress: &dyn Fn(u64, Option<u64>),
 ) -> anyhow::Result<RefreshReport> {
     let src = provider.id();
     let name = provider.name();
@@ -235,7 +301,7 @@ pub fn refresh(
             log(&format!("{name}: достигнут предел {max_pages} страниц"));
             break;
         }
-        let list = match with_retry(|| provider.list(page)) {
+        let list = match with_retry(provider, log, |p| p.list(page)) {
             Ok(l) => l,
             Err(e @ ProviderError::Blocked(_)) => {
                 rep.stopped = Some(e.to_string());
@@ -258,37 +324,10 @@ pub fn refresh(
         }
         rep.pages_read += 1;
         rep.errors += list.bad_items;
-        let mut changed = 0;
-        let tx = conn.unchecked_transaction()?;
-        for g in &list.games {
-            let key = (g.source.clone(), g.ext_id.clone());
-            let again = !seen.insert(key);
-            if again && !topping_up {
-                // the feed moved while being read: the same release on two pages
-                rep.repeats += 1;
-                continue;
-            }
-            match store::upsert_listed(&tx, g, "feed")? {
-                // read again at the end of a full pass: only real changes count
-                store::Change::Unchanged | store::Change::Hidden(_) if again => {}
-                store::Change::New | store::Change::Updated if again => {
-                    rep.updated += 1;
-                    changed += 1;
-                }
-                store::Change::New => {
-                    rep.new += 1;
-                    changed += 1;
-                }
-                store::Change::Updated => {
-                    rep.updated += 1;
-                    changed += 1;
-                }
-                store::Change::Unchanged => rep.unchanged += 1,
-                store::Change::Hidden(_) => rep.hidden_by_policy += 1,
-            }
+        let changed = ingest(conn, &list.games, &mut seen, topping_up, &mut rep)?;
+        if !topping_up {
+            progress(page as u64, rep.pages_total.map(u64::from));
         }
-        tx.commit()?;
-        rep.discovered = seen.len();
         log(&format!(
             "{name}: страница {page}{} — найдено {}, новых {}, обновлённых {}",
             rep.pages_total
@@ -309,6 +348,38 @@ pub fn refresh(
         }
         store::set_meta(conn, src, "feed_resume_page", &(page + 1).to_string())?;
         if last {
+            // pages that failed during the pass get one more chance now
+            if !rep.pages_failed.is_empty() {
+                let failed = std::mem::take(&mut rep.pages_failed);
+                log(&format!(
+                    "{name}: повторно читаю непрочитанные страницы: {failed:?}"
+                ));
+                for fp in failed {
+                    match with_retry(provider, log, |p| p.list(fp)) {
+                        Ok(l) => {
+                            rep.pages_read += 1;
+                            rep.errors = rep.errors.saturating_sub(1) + l.bad_items;
+                            ingest(conn, &l.games, &mut seen, true, &mut rep)?;
+                            log(&format!(
+                                "{name}: страница {fp} прочитана со второй попытки"
+                            ));
+                        }
+                        Err(e @ ProviderError::Blocked(_)) => {
+                            rep.pages_failed.push(fp);
+                            rep.stopped = Some(e.to_string());
+                            log(&format!("{name}: {e}"));
+                            break;
+                        }
+                        Err(e) => {
+                            rep.pages_failed.push(fp);
+                            log(&format!("{name}: страница {fp} снова не прочитана: {e}"));
+                        }
+                    }
+                }
+                if rep.stopped.is_some() {
+                    break;
+                }
+            }
             // the whole feed is read; releases that moved to the top meanwhile are caught by
             // reading the first pages again until two of them bring nothing
             rep.complete = rep.pages_failed.is_empty();
@@ -364,6 +435,7 @@ pub fn audit(
     max_pages: u32,
     check_limit: usize,
     log: &dyn Fn(&str),
+    progress: &dyn Fn(u64, Option<u64>),
 ) -> anyhow::Result<AuditReport> {
     let src = provider.id();
     let name = provider.name();
@@ -375,7 +447,7 @@ pub fn audit(
     let mut seen = std::collections::HashSet::new();
     let mut page = 1;
     while page <= max_pages {
-        let idx = match with_retry(|| provider.index_page(page)) {
+        let idx = match with_retry(provider, log, |p| p.index_page(page)) {
             Ok(i) => i,
             Err(e @ ProviderError::Blocked(_)) => {
                 rep.stopped = Some(e.to_string());
@@ -411,6 +483,7 @@ pub fn audit(
         }
         tx.commit()?;
         rep.index_threads = seen.len();
+        progress(page as u64, rep.pages_total.map(u64::from));
         log(&format!(
             "{name}: список тем, страница {page}{} — тем {}, нет в каталоге {}",
             rep.pages_total
@@ -428,7 +501,7 @@ pub fn audit(
     // read the pages of threads found only in the index, so their tags are known
     if rep.stopped.is_none() {
         for id in store::unchecked(conn, src, check_limit)? {
-            match provider.details(&id) {
+            match with_retry(provider, log, |p| p.details(&id)) {
                 Ok(g) => {
                     if let store::Change::Hidden(_) = store::save_details(conn, &g)? {
                         rep.hidden_by_policy += 1;
@@ -542,7 +615,10 @@ mod tests {
         index: Vec<Vec<ExtGame>>,
         fail_at: Option<u32>,
         blocked_at: Option<u32>,
+        /// page -> how many more times it answers "temporarily unavailable"
+        flaky: std::collections::HashMap<u32, u32>,
         calls: Vec<u32>,
+        slowed: u32,
     }
 
     impl Fake {
@@ -552,7 +628,9 @@ mod tests {
                 index: Vec::new(),
                 fail_at: None,
                 blocked_at: None,
+                flaky: Default::default(),
                 calls: Vec::new(),
+                slowed: 0,
             }
         }
     }
@@ -572,6 +650,10 @@ mod tests {
             if self.fail_at == Some(page) {
                 return Err(ProviderError::Parse("broken page".into()));
             }
+            if let Some(n) = self.flaky.get_mut(&page).filter(|n| **n > 0) {
+                *n -= 1;
+                return Err(ProviderError::Unavailable("пустой ответ".into()));
+            }
             Ok(ListPage {
                 games: self
                     .pages
@@ -581,6 +663,12 @@ mod tests {
                 total_pages: Some(self.pages.len() as u32),
                 bad_items: 0,
             })
+        }
+        fn slow_down(&mut self) {
+            self.slowed += 1;
+        }
+        fn retry_pause(&self) -> std::time::Duration {
+            std::time::Duration::ZERO
         }
         fn details(&mut self, id: &str) -> Result<ExtGame, ProviderError> {
             let mut g = game(id, "1", &["2dcg"]);
@@ -628,7 +716,7 @@ mod tests {
         // far more pages than the old limit of 400
         let mut p = Fake::new(pages(450, 2));
         p.pages[3][0].tags = vec!["loli".into()];
-        let r = refresh(&mut p, &conn, true, 5000, &|_| {}).unwrap();
+        let r = refresh(&mut p, &conn, true, 5000, &|_| {}, &|_, _| {}).unwrap();
         assert!(r.complete, "{r:?}");
         assert_eq!(r.pages_total, Some(450));
         assert_eq!((r.discovered, r.new, r.hidden_by_policy), (900, 899, 1));
@@ -654,7 +742,7 @@ mod tests {
         for g in &p.pages[0] {
             store::upsert_listed(&conn, g, "feed").unwrap();
         }
-        let r = refresh(&mut p, &conn, false, 5000, &|_| {}).unwrap();
+        let r = refresh(&mut p, &conn, false, 5000, &|_| {}, &|_, _| {}).unwrap();
         assert_eq!(r.mode, "full");
         assert_eq!(store::stats(&conn, "fake").unwrap().stored, 15);
         assert!(r.complete);
@@ -664,10 +752,10 @@ mod tests {
     fn update_stops_after_two_quiet_pages_and_catches_changes() {
         let conn = store::open_memory();
         let mut p = Fake::new(pages(10, 3));
-        refresh(&mut p, &conn, true, 5000, &|_| {}).unwrap();
+        refresh(&mut p, &conn, true, 5000, &|_| {}, &|_, _| {}).unwrap();
         // nothing changed: two pages are read
         p.calls.clear();
-        let r = refresh(&mut p, &conn, false, 5000, &|_| {}).unwrap();
+        let r = refresh(&mut p, &conn, false, 5000, &|_| {}, &|_, _| {}).unwrap();
         assert_eq!((r.mode.as_str(), p.calls.len(), r.new), ("update", 2, 0));
         // an old release got a new version and moved to the top; a new one appeared
         let mut moved = p.pages[7].remove(1);
@@ -675,7 +763,7 @@ mod tests {
         p.pages[0].insert(0, moved);
         p.pages[0].insert(0, game("999", "1", &["x"]));
         p.calls.clear();
-        let r = refresh(&mut p, &conn, false, 5000, &|_| {}).unwrap();
+        let r = refresh(&mut p, &conn, false, 5000, &|_| {}, &|_, _| {}).unwrap();
         assert_eq!((r.new, r.updated), (1, 1));
         assert_eq!(p.calls, vec![1, 2, 3]);
     }
@@ -685,7 +773,7 @@ mod tests {
         let conn = store::open_memory();
         let mut p = Fake::new(pages(6, 2));
         p.blocked_at = Some(4);
-        let r = refresh(&mut p, &conn, true, 5000, &|_| {}).unwrap();
+        let r = refresh(&mut p, &conn, true, 5000, &|_| {}, &|_, _| {}).unwrap();
         assert!(r.stopped.as_deref().unwrap().contains("captcha"));
         assert!(!r.complete);
         assert_eq!(r.discovered, 6);
@@ -696,7 +784,7 @@ mod tests {
         p.blocked_at = None;
         p.fail_at = Some(5);
         p.calls.clear();
-        let r = refresh(&mut p, &conn, true, 5000, &|_| {}).unwrap();
+        let r = refresh(&mut p, &conn, true, 5000, &|_| {}, &|_, _| {}).unwrap();
         assert_eq!(r.resumed_from, Some(4));
         assert_eq!(&p.calls[..3], &[4, 5, 6]);
         assert_eq!(r.pages_failed, vec![5]);
@@ -709,13 +797,37 @@ mod tests {
     }
 
     #[test]
+    fn temporary_failures_are_retried_and_recovered() {
+        let conn = store::open_memory();
+        let mut p = Fake::new(pages(5, 2));
+        // page 2: two empty answers, the third try works
+        p.flaky.insert(2, 2);
+        // page 4: fails all three tries during the pass, works when retried at the end
+        p.flaky.insert(4, 3);
+        let progress = std::cell::RefCell::new(Vec::new());
+        let r = refresh(&mut p, &conn, true, 5000, &|_| {}, &|d, t| {
+            progress.borrow_mut().push((d, t))
+        })
+        .unwrap();
+        assert!(r.complete, "{r:?}");
+        assert!(r.pages_failed.is_empty());
+        assert_eq!(r.errors, 0);
+        assert_eq!(r.discovered, 10);
+        assert_eq!(store::stats(&conn, "fake").unwrap().stored, 10);
+        assert!(p.slowed >= 3, "the provider was asked to slow down");
+        // page progress for the UI: 1..5 of 5
+        assert_eq!(progress.borrow().first(), Some(&(1, Some(5))));
+        assert!(progress.borrow().contains(&(5, Some(5))));
+    }
+
+    #[test]
     fn repeats_are_counted_not_stored_twice() {
         let conn = store::open_memory();
         let mut p = Fake::new(pages(3, 2));
         // the feed shifted while being read: page 2 starts with the last entry of page 1
         let dup = p.pages[0][1].clone();
         p.pages[1].insert(0, dup);
-        let r = refresh(&mut p, &conn, true, 5000, &|_| {}).unwrap();
+        let r = refresh(&mut p, &conn, true, 5000, &|_| {}, &|_, _| {}).unwrap();
         assert_eq!((r.discovered, r.repeats), (6, 1));
         assert_eq!(store::stats(&conn, "fake").unwrap().stored, 6);
     }
@@ -724,7 +836,7 @@ mod tests {
     fn audit_adds_what_the_feed_missed() {
         let conn = store::open_memory();
         let mut p = Fake::new(pages(2, 2));
-        refresh(&mut p, &conn, true, 5000, &|_| {}).unwrap();
+        refresh(&mut p, &conn, true, 5000, &|_| {}, &|_, _| {}).unwrap();
         // the forum knows two more threads
         let mut extra = game("50", "1", &[]);
         extra.tags.clear();
@@ -732,7 +844,7 @@ mod tests {
             p.pages[0].clone(),
             vec![p.pages[1][0].clone(), extra.clone(), game("51", "1", &[])],
         ];
-        let r = audit(&mut p, &conn, 5000, 100, &|_| {}).unwrap();
+        let r = audit(&mut p, &conn, 5000, 100, &|_| {}, &|_, _| {}).unwrap();
         assert!(r.complete);
         assert_eq!(
             (
