@@ -880,10 +880,20 @@ pub fn html_unescape(s: &str) -> String {
 
 /// Visible text of an HTML fragment, one line per block.
 pub fn html_text(html: &str) -> String {
+    // a line break in the page source is just a space; only tags break lines
+    fn push_text(out: &mut String, text: &str) {
+        out.extend(text.chars().map(|c| {
+            if matches!(c, '\n' | '\r' | '\t') {
+                ' '
+            } else {
+                c
+            }
+        }));
+    }
     let mut out = String::new();
     let mut rest = html;
     while let Some(i) = rest.find('<') {
-        out.push_str(&rest[..i]);
+        push_text(&mut out, &rest[..i]);
         let Some(j) = rest[i..].find('>') else {
             rest = "";
             break;
@@ -908,7 +918,7 @@ pub fn html_text(html: &str) -> String {
         }
         rest = &rest[i + j + 1..];
     }
-    out.push_str(rest);
+    push_text(&mut out, rest);
     let text = html_unescape(&out);
     let mut lines: Vec<String> = Vec::new();
     for l in text.lines() {
@@ -942,24 +952,105 @@ fn attr_values<'a>(html: &'a str, attr: &str) -> Vec<(usize, &'a str)> {
 
 /// `Name: value` on its own line in the first post.
 fn field(text: &str, names: &[&str]) -> Option<String> {
-    for line in text.lines() {
-        let l = line.trim();
-        for n in names {
+    let lines: Vec<&str> = text.lines().map(str::trim).collect();
+    // earlier names win ("Developer/Publisher" before "Developer")
+    for n in names {
+        for (i, l) in lines.iter().enumerate() {
             let (Some(head), Some(tail)) = (l.get(..n.len()), l.get(n.len()..)) else {
                 continue;
             };
-            if !tail.is_empty()
-                && head.eq_ignore_ascii_case(n)
-                && tail.trim_start().starts_with(':')
-            {
-                let v = tail.trim_start()[1..].trim();
-                if !v.is_empty() {
-                    return Some(v.to_string());
+            if !head.eq_ignore_ascii_case(n) {
+                continue;
+            }
+            let next = || lines[i + 1..].iter().find(|x| !x.is_empty()).copied();
+            let tail = tail.trim_start();
+            let value = if let Some(v) = tail.strip_prefix(':') {
+                // "Name: value", or the value on the next line
+                let v = v.trim();
+                if v.is_empty() {
+                    next().unwrap_or("")
+                } else {
+                    v
                 }
+            } else if tail.is_empty() {
+                // "Name" alone, ": value" on the next line
+                match next().and_then(|x| x.strip_prefix(':')) {
+                    Some(v) => v.trim(),
+                    None => continue,
+                }
+            } else {
+                continue;
+            };
+            if !value.is_empty() {
+                return Some(value.to_string());
             }
         }
     }
     None
+}
+
+/// Names the developer line goes by in first posts.
+const DEVELOPER_FIELDS: &[&str] = &[
+    "Developer/Publisher",
+    "Developer & Publisher",
+    "Developer / Publisher",
+    "Original Developer",
+    "Developers",
+    "Developer",
+    "Publisher",
+    "Artist",
+];
+
+/// "Acme Games - Patreon - Discord" -> "Acme Games": the name without the link labels that
+/// follow it on the same line.
+fn clean_developer(raw: &str) -> String {
+    const SEPARATORS: &[&str] = &[" - ", " – ", " — ", " | ", " / ", ", ", " (", " ["];
+    const LINK_WORDS: &[&str] = &[
+        "patreon",
+        "subscribestar",
+        "itch.io",
+        "itch",
+        "discord",
+        "twitter",
+        "website",
+        "steam",
+        "blog",
+        "tumblr",
+        "pixiv",
+        "fanbox",
+        "ko-fi",
+        "kofi",
+        "gumroad",
+        "buymeacoffee",
+        "dlsite",
+        "youtube",
+        "instagram",
+        "facebook",
+        "trello",
+        "wiki",
+    ];
+    let mut name = raw.trim();
+    for sep in SEPARATORS {
+        if let Some(i) = name.find(sep) {
+            // keep the text when the name itself would be lost ("- Patreon")
+            if !name[..i].trim().is_empty() {
+                name = name[..i].trim();
+            }
+        }
+    }
+    // link labels glued to the name with spaces only: "Acme Patreon Discord"
+    let mut words: Vec<&str> = name.split_whitespace().collect();
+    while words.len() > 1
+        && words
+            .last()
+            .is_some_and(|w| LINK_WORDS.contains(&w.to_lowercase().as_str()))
+    {
+        words.pop();
+    }
+    words
+        .join(" ")
+        .trim_matches(|c: char| "-–—|/\\:,()[]{} ".contains(c))
+        .to_string()
 }
 
 /// Free text after "Overview:" up to the next `Header:` line.
@@ -1198,18 +1289,30 @@ pub fn parse_thread(html: &str, id: &str) -> Result<ExtGame, ProviderError> {
             .find("</dd>")
             .or_else(|| html[i..].find("</div>"))
             .unwrap_or(0);
-        for (_, href) in attr_values(&html[i..i + end], "href") {
-            if let Some(slug) = href.strip_prefix("/tags/") {
-                let t = slug.trim_matches('/').replace('-', " ");
-                if !t.is_empty() && !tags.contains(&t) {
-                    tags.push(t);
-                }
+        let list = &html[i..i + end];
+        for (pos, href) in attr_values(list, "href") {
+            let Some(slug) = href.strip_prefix("/tags/") else {
+                continue;
+            };
+            // the name is the link's text ("asset-addon", "3d game"), as in the feed; the
+            // address ("3d-game") is only a fallback
+            let name = list[pos..]
+                .find('>')
+                .and_then(|g| list[pos + g + 1..].find("</a>").map(|e| (pos + g + 1, e)))
+                .map(|(st, e)| html_text(&list[st..st + e]).to_lowercase())
+                .filter(|t| !t.is_empty() && t.len() < 60)
+                .unwrap_or_else(|| slug.trim_matches('/').replace('-', " "));
+            if !name.is_empty() && !tags.contains(&name) {
+                tags.push(name);
             }
         }
     }
     // first post
-    let post_start = html
+    // the thread's first post (a notice above it may have a text block of its own)
+    let from = html.find("message-threadStarterPost").unwrap_or(0);
+    let post_start = html[from..]
         .find("<div class=\"bbWrapper\">")
+        .map(|i| from + i)
         .ok_or_else(|| ProviderError::Parse("нет первого сообщения".into()))?;
     let post_end = html[post_start..]
         .find("</article>")
@@ -1241,15 +1344,20 @@ pub fn parse_thread(html: &str, id: &str) -> Result<ExtGame, ProviderError> {
             url,
         });
     }
-    let developer = field(&text, &["Developer", "Developer/Publisher", "Artist"])
-        .map(|d| d.split(" - ").next().unwrap_or("").trim().to_string())
+    // the title's "[Developer]" is the site's own short form; the post's field is the fallback
+    let developer = brackets
+        .last()
+        .filter(|_| brackets.len() >= 2)
+        .cloned()
+        .or_else(|| field(&text, DEVELOPER_FIELDS).map(|d| clean_developer(&d)))
         .filter(|d| !d.is_empty())
         .or_else(|| brackets.last().cloned())
         .unwrap_or_default();
-    let version = field(&text, &["Version"])
+    let version = field(&text, &["Version", "Game Version", "Mod Version"])
         .or_else(|| brackets.first().cloned().filter(|b| b != &developer))
         .unwrap_or_default();
     let updated = field(&text, &["Thread Updated", "Updated", "Release Date"]).and_then(|d| {
+        let d = d.trim().to_string();
         let d = d.replace('/', "-");
         let ok = d.len() >= 10
             && d.get(..10).is_some_and(|h| {
@@ -1494,6 +1602,91 @@ mod tests {
         assert!(d.ends_with("story."));
     }
 
+    /// A page shaped like the real ones: a notice with its own text block above the thread,
+    /// prefixes as links, the first post marked as the thread starter, values on the next line.
+    const THREAD2: &str = r#"<html><head><title>VN - Ren'Py - Winter Tale [Ch. 3] [Northern Lights Studio] | F95zone</title></head>
+      <body data-template="thread_view">
+      <div class="notice-content"><div class="bbWrapper">Site notice: <a href="https://www.patreon.com/notthegame">support us</a></div></div>
+      <div class="p-body-header"><h1 class="p-title-value"><a href="/forums/games.2/?prefix_id=13" class="labelLink" rel="nofollow"><span class="label label--red" dir="auto">VN</span></a><span class="label-append">&nbsp;</span><a href="/forums/games.2/?prefix_id=7" class="labelLink" rel="nofollow"><span class="label label--lightGreen" dir="auto">Ren&#039;Py</span></a><span class="label-append">&nbsp;</span><a href="/forums/games.2/?prefix_id=22" class="labelLink" rel="nofollow"><span class="label label--orange" dir="auto">Onhold</span></a><span class="label-append">&nbsp;</span>Winter Tale [Ch. 3] [Northern Lights Studio]</h1>
+      <dl class="tagList"><dt>Tags</dt><dd><span class="js-tagList"><a href="/tags/3dcg/" class="tagItem" dir="auto">3dcg</a> <a href="/tags/asset-addon/" class="tagItem" dir="auto">asset-addon</a> <a href="/tags/male-protagonist/" class="tagItem" dir="auto">male protagonist</a></span></dd></dl></div>
+      <article class="message message--post message-threadStarterPost js-post" data-author="uploader"><div class="message-inner">
+      <article class="message-body js-selectToQuote"><div class="bbWrapper"><div class="lbContainer lbContainer--inline" data-src="https://attachments.f95zone.to/2026/11/12345_cover.png"><img src="https://attachments.f95zone.to/2026/11/12345_cover.png" class="bbImage" /></div><br />
+      <b>Overview:</b><br />
+      A long winter in a small town – and a letter that changes everything.<br />
+      <br />
+      <b>Thread Updated</b>: 2026/10/30<br />
+      <b>Release Date</b>: 2026-10-29<br />
+      <b>Developer</b>:<br />
+      Northern Lights Studio <a href="https://www.patreon.com/northernlights" class="link link--external">Patreon</a> - <a href="https://northernlights.itch.io/winter-tale" class="link link--external">Itch.io</a> - <a href="https://discord.gg/abc" class="link link--external">Discord</a><br />
+      <b>Censored</b>: No<br />
+      <b>Game Version</b>: Ch. 3<br />
+      <b>OS</b>: Windows, Linux<br />
+      <b>Genre</b>:<br />
+      <div class="bbCodeSpoiler"><button class="bbCodeSpoiler-button"><span>Spoiler</span></button><div class="bbCodeSpoiler-content">3DCG, Male protagonist</div></div>
+      <div style="text-align: center"><span style="font-size: 18px"><b>DOWNLOAD</b></span><br />
+      <b>Win/Linux</b>: <a href="https://f95zone.to/masked/mega.nz/1/2/abc" class="link link--external">MEGA</a> - <a href="https://pixeldrain.com/u/x">PIXELDRAIN</a></div>
+      </div></article></div></article>
+      <article class="message message--post js-post"><article class="message-body"><div class="bbWrapper">A reply with <a href="https://www.patreon.com/someoneelse">another link</a></div></article></article>
+      </body></html>"#;
+
+    #[test]
+    fn game_page_shaped_like_the_real_ones() {
+        let g = parse_thread(THREAD2, "777").unwrap();
+        assert_eq!(g.title, "Winter Tale");
+        assert_eq!(g.developer, "Northern Lights Studio");
+        assert_eq!(g.version, "Ch. 3");
+        assert_eq!((g.status.as_str(), g.engine.as_str()), ("onhold", "Ren'Py"));
+        // names as the feed gives them: the hyphen of "asset-addon" stays
+        assert_eq!(g.tags, vec!["3dcg", "asset-addon", "male protagonist"]);
+        assert_eq!(g.updated.as_deref(), Some("2026-10-30"));
+        assert_eq!(
+            g.description.as_deref(),
+            Some("A long winter in a small town – and a letter that changes everything.")
+        );
+        assert_eq!(
+            g.cover.as_deref(),
+            Some("https://attachments.f95zone.to/2026/11/12345_cover.png")
+        );
+        // only the first post, only above DOWNLOAD: not the notice, not the reply, no file hosts
+        let urls: Vec<&str> = g.links.iter().map(|l| l.url.as_str()).collect();
+        assert_eq!(
+            urls,
+            vec![
+                "https://www.patreon.com/northernlights",
+                "https://northernlights.itch.io/winter-tale",
+                "https://discord.gg/abc"
+            ]
+        );
+    }
+
+    #[test]
+    fn developer_names_lose_their_link_labels() {
+        assert_eq!(
+            clean_developer("Acme Games - Patreon - Discord"),
+            "Acme Games"
+        );
+        assert_eq!(clean_developer("Acme Games Patreon Discord"), "Acme Games");
+        assert_eq!(clean_developer("Acme – Website | Itch.io"), "Acme");
+        assert_eq!(clean_developer("Dr. X (formerly Y)"), "Dr. X");
+        assert_eq!(clean_developer("Patreon"), "Patreon");
+        // no name on the line at all: nothing, the title's "[Developer]" is used instead
+        assert_eq!(clean_developer(" - Patreon"), "");
+        // fields: value on the next line, colon on the next line, longer names first
+        assert_eq!(
+            field("Developer:\n\nAcme", &["Developer"]).as_deref(),
+            Some("Acme")
+        );
+        assert_eq!(
+            field("Developer\n: Acme", &["Developer"]).as_deref(),
+            Some("Acme")
+        );
+        assert_eq!(
+            field("Developers: A & B\nDeveloper: C", DEVELOPER_FIELDS).as_deref(),
+            Some("A & B")
+        );
+        assert_eq!(field("Developer notes are here", &["Developer"]), None);
+    }
+
     #[test]
     fn multibyte_text_never_breaks_parsing() {
         // the exact crash from a real page: '&' then an en dash right at byte 12
@@ -1506,7 +1699,7 @@ mod tests {
         );
         // characters of 2, 3 and 4 bytes, and one whose lower case is longer than itself
         for ch in ["–", "İ", "😀", "é"] {
-            for (name, page) in [("thread", THREAD), ("forum", FORUM)] {
+            for (name, page) in [("thread", THREAD), ("thread2", THREAD2), ("forum", FORUM)] {
                 let mut at = 0;
                 while at <= page.len() {
                     if page.is_char_boundary(at) {
@@ -1537,5 +1730,10 @@ mod tests {
             "a & b 'c' &bogus d"
         );
         assert_eq!(excerpt("One. Two. Three.", 10), "One. Two.…");
+        // a line break in the source is a space; <br> is a line; <br><br> a paragraph
+        assert_eq!(
+            html_text("one<br />\ntwo\nstill two<br />\n<br />\nthree"),
+            "one\ntwo still two\n\nthree"
+        );
     }
 }
