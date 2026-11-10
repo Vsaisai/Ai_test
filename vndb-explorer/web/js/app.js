@@ -123,7 +123,9 @@ async function watchJob(doneText) {
     if (job.error) { showBanner(`⚠️ Обновление не удалось: ${humanError(job.error)}`); return; }
     // the data changed: redraw the current page by itself instead of asking to reload
     api.resetTags();
-    route();
+    // Settings keeps itself up to date (its own job boxes); redrawing it would fold the opened
+    // sections and lose the place the user is looking at
+    if (!location.hash.startsWith('#/settings')) route();
     const text = doneText || ({ import: '✅ База VNDB загружена.', sync: '✅ Новые новеллы и релизы добавлены.', sources: '✅ Каталоги переводов обновлены.', external: '✅ Каталог F95Zone обновлён.', 'external-audit': '✅ Сверка с форумом F95Zone закончена.', 'external-check': '✅ Проверка F95Zone закончена.' })[job.kind] || '✅ Готово.';
     showBanner(text);
     const shown = banner.textContent;

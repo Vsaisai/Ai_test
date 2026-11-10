@@ -175,6 +175,8 @@ pub struct AppState {
     /// Cached result of the last update check: (when, value)
     pub updates: Mutex<Option<(std::time::Instant, Value)>>,
     pub http: reqwest::Client,
+    /// Set by "Stop": long external jobs end after their current request
+    pub cancel: std::sync::atomic::AtomicBool,
     /// VNDB match index for external games: (catalog imported_at, index)
     pub ext_index: Mutex<Option<(String, Arc<vndb_core::external::matching::Index>)>>,
 }
@@ -287,6 +289,7 @@ impl AppState {
                 .timeout(std::time::Duration::from_secs(30))
                 .build()?,
             ext_index: Mutex::new(None),
+            cancel: std::sync::atomic::AtomicBool::new(false),
             data_dir,
         })
     }
@@ -415,6 +418,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/ext/game/:source/:id/match", put(external::set_match))
         .route("/api/ext/audit", post(external::audit))
         .route("/api/ext/check", post(external::check))
+        .route("/api/ext/stop", post(external::stop))
         .route("/api/my", get(my_list))
         .route("/api/my/export", get(my_export))
         .route("/api/my/import", post(my_import))
@@ -481,6 +485,10 @@ pub fn start_job(
         if st.running {
             return false;
         }
+        // a Stop meant for the previous job must not end this one
+        state
+            .cancel
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         *st = JobStatus {
             kind: kind.to_string(),
             running: true,

@@ -61,6 +61,7 @@ export const api = {
   extTags: () => call('GET', '/api/ext/tags?source=f95zone'),
   extAudit: () => call('POST', '/api/ext/audit', { source: 'f95zone' }),
   extCheck: () => call('POST', '/api/ext/check', {}),
+  extStop: () => call('POST', '/api/ext/stop', {}),
   extMatch: (id, body) => call('PUT', `/api/ext/game/f95zone/${encodeURIComponent(id)}/match`, body),
   extGame: (id, refresh = false) => call('GET', `/api/ext/game/f95zone/${encodeURIComponent(id)}${refresh ? '?refresh=1' : ''}`),
   sources: () => call('GET', '/api/sources'),
