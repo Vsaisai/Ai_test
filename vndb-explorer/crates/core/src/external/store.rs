@@ -268,8 +268,12 @@ pub fn save_details(conn: &Connection, g: &ExtGame) -> Result<Change> {
     let keep = |v: &str| (!v.is_empty()).then(|| v.to_string());
     conn.execute(
         "UPDATE ext_games SET
-            title = COALESCE(?3, title), norm_title = COALESCE(?4, norm_title),
-            developer = COALESCE(?5, developer), version = COALESCE(?6, version),
+            -- the listing's title and developer are the site's own clean values: the page
+            -- only fills them in when the listing had none
+            title = CASE WHEN title = '' THEN COALESCE(?3, title) ELSE title END,
+            norm_title = CASE WHEN norm_title = '' THEN COALESCE(?4, norm_title) ELSE norm_title END,
+            developer = CASE WHEN developer = '' THEN COALESCE(?5, developer) ELSE developer END,
+            version = COALESCE(?6, version),
             status = COALESCE(?7, status), engine = COALESCE(?8, engine),
             tags = COALESCE(?9, tags), cover = COALESCE(?10, cover), updated = COALESCE(?11, updated),
             description = ?12, links = ?13, details_at = ?14, needs_check = 0
