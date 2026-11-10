@@ -126,6 +126,11 @@ public class JobService extends Service {
                     String text;
                     if (err != null) {
                         text = "Ошибка: " + err;
+                    } else if (job.optString("kind").startsWith("external")) {
+                        // the last log line says what was done (or that the job was stopped)
+                        org.json.JSONArray log = job.optJSONArray("log");
+                        String last = log != null && log.length() > 1 ? log.optString(log.length() - 2) : "";
+                        text = last.isEmpty() ? "Готово" : last;
                     } else if (st.optBoolean("ready")) {
                         text = "Готово: в базе " + st.optInt("vns") + " новелл";
                     } else {
@@ -168,6 +173,9 @@ public class JobService extends Service {
             case "import": return "Загрузка базы VNDB";
             case "sync": return "Новые новеллы и релизы";
             case "sources": return "Индексы каталогов";
+            case "external": return "Каталог F95Zone";
+            case "external-audit": return "Сверка с форумом F95Zone";
+            case "external-check": return "Проверка F95Zone";
             default: return "VN Shelf";
         }
     }

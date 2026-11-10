@@ -50,17 +50,34 @@ function runRefresh(box, full, done) {
 
 const EXT_JOBS = ['external', 'external-audit', 'external-check'];
 
+/** Draw a running F95Zone job in `box` every second, with a Stop button, until it ends. */
+function watchJob(box, done) {
+  let stopping = false;
+  const stopBtn = h('button', { class: 'btn', type: 'button', onclick: async () => {
+    stopping = true;
+    stopBtn.disabled = true;
+    stopBtn.textContent = 'Останавливаю…';
+    try { await api.extStop(); } catch (e) { toast(e.message); }
+  } }, 'Остановить');
+  const note = h('p', { class: 'muted small' }, 'Можно остановить в любой момент: следующий запуск продолжит с того же места.');
+  const poll = async () => {
+    const st = await api.status().catch(() => null);
+    const job = st && st.import;
+    if (job && EXT_JOBS.includes(job.kind)) {
+      // keep the Stop button out of the redrawn part, so a tap is never lost
+      box.replaceChildren(jobPanel(job), ...(job.running ? [h('div', { class: 'toolbar' }, stopBtn), note] : []));
+    }
+    if (job && job.running) { setTimeout(poll, 1000); return; }
+    if (stopping) toast('Остановлено');
+    done && done(job);
+  };
+  poll();
+}
+
 function runJob(box, start, done) {
   start().then(r => {
     if (!r.started) { toast('Уже идёт другое обновление — попробуйте позже'); return; }
-    const poll = async () => {
-      const st = await api.status().catch(() => null);
-      const job = st && st.import;
-      if (job && EXT_JOBS.includes(job.kind)) box.replaceChildren(jobPanel(job));
-      if (job && job.running) { setTimeout(poll, 1000); return; }
-      done && done(job);
-    };
-    poll();
+    watchJob(box, done);
   }).catch(e => box.replaceChildren(errorBox(e)));
 }
 
@@ -78,10 +95,14 @@ function completeness(s) {
   const a = s.last_audit;
   if (!s.feed_complete_at) return ['warn', 'Полнота не подтверждена: лента ещё не прочитана целиком. Нажмите «Загрузить всю ленту».'];
   if (!a) return ['warn', `Лента прочитана целиком (${when(s.feed_complete_at)}), но полнота не подтверждена: нужна «Сверка с форумом».`];
-  if (!a.complete || a.stopped) return ['warn', `Сверка с форумом не завершена (${a.stopped || `не прочитаны страницы: ${a.pages_failed.join(', ')}`}). Полнота не подтверждена.`];
-  if (s.needs_check) return ['warn', `Сверка ${when(a.finished_at)}: в форуме ${n(a.index_threads)} тем, все записаны в каталог, но у ${n(s.needs_check)} ещё не прочитаны страницы (нужны теги). Запустите сверку ещё раз.`];
+  if (!a.complete) {
+    const why = a.cancelled ? 'остановлена вами' : a.stopped || (a.pages_failed.length ? `не прочитаны страницы списка: ${a.pages_failed.join(', ')}` : 'прервана');
+    return ['warn', `Сверка с форумом не завершена (${why}): пройдено ${n(a.pages_read)}${a.pages_total ? ` из ${n(a.pages_total)}` : ''} страниц списка. Нажмите «Сверить с форумом» — продолжится с того же места.`];
+  }
+  if (s.needs_check) return ['warn', `Список тем пройден (${n(a.index_threads)} тем), но у ${n(s.needs_check)} новых тем ещё не прочитаны страницы — без этого их нельзя показывать. Нажмите «Сверить с форумом»: список заново проходиться не будет, дочитаются только эти страницы.`];
+  const failed = s.check_failed ? ` Не удалось прочитать страницы ${n(s.check_failed)} тем — они сохранены, но не показываются.` : '';
   return ['ok', `✓ Полнота подтверждена сверкой ${when(a.finished_at)}: все ${n(a.index_threads)} тем форума Games есть в каталоге` +
-    (a.missing_added ? ` (${n(a.missing_added)} из них лента не показывала — добавлены при сверке)` : '') + '.'];
+    (a.missing_added ? ` (${n(a.missing_added)} из них лента не показывала — добавлены при сверке)` : '') + `.${failed}`];
 }
 
 function reportBox(s) {
@@ -99,9 +120,26 @@ function reportBox(s) {
     ['Страниц ленты', `${n(r.pages_read)} прочитано${r.pages_total ? ` из ${n(r.pages_total)}` : ''}${r.resumed_from ? `, продолжено со страницы ${r.resumed_from}` : ''}`],
   ];
   return h('div', { class: 'ext-report' },
-    h('b', {}, `Последний импорт (${r.mode === 'full' ? 'вся лента' : 'обновление'}, ${when(r.finished_at)})${r.complete ? '' : r.mode === 'full' ? ' — не завершён' : ''}`),
+    h('b', {}, `Последний импорт (${r.mode === 'full' ? 'вся лента' : 'обновление'}, ${when(r.finished_at)})${r.cancelled ? ' — остановлен' : r.complete ? '' : r.mode === 'full' ? ' — не завершён' : ''}`),
     h('dl', { class: 'meta' }, rows.flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, v)])),
     r.stopped ? h('p', { class: 'small' }, `⚠️ Остановлено: ${r.stopped}`) : null);
+}
+
+function auditBox(s) {
+  const a = s.last_audit;
+  if (!a) return null;
+  const rows = [
+    ['Тем в форуме Games', `${n(a.index_threads)}${a.service_threads ? ` (+ служебных: ${n(a.service_threads)})` : ''}`],
+    ['Уже были в каталоге', n(a.already_in_catalog)],
+    ['Не было в ленте — добавлены', n(a.missing_added)],
+    ['Страниц новых тем прочитано', `${n(a.checked)}${s.needs_check ? `, осталось ${n(s.needs_check)}` : ''}`],
+    ['Скрыто правилами', n(a.hidden_by_policy)],
+    ['Ошибок', `${n(a.errors)}${s.check_failed ? ` (тем не открылось: ${n(s.check_failed)})` : ''}`],
+    ['Страниц списка', `${n(a.pages_read)}${a.pages_total ? ` из ${n(a.pages_total)}` : ''}`],
+  ];
+  return h('div', { class: 'ext-report' },
+    h('b', {}, `Последняя сверка с форумом (${when(a.finished_at)})${a.cancelled ? ' — остановлена' : a.stopped ? ' — прервана' : ''}`),
+    h('dl', { class: 'meta' }, rows.flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, v)])));
 }
 
 function hiddenNote(s) {
@@ -131,12 +169,16 @@ export function extSettings() {
       f.stored ? h('p', { class: `small ${kind === 'ok' ? 'ok-line' : ''}` }, kind === 'ok' ? text : `⚠️ ${text}`) : null,
       f.cooldown_left ? h('p', { class: 'small' }, `⏸ Сайт попросил паузу (слишком много запросов). Можно нажимать кнопки — работа начнётся сама через ~${Math.ceil(f.cooldown_left / 60)} мин.`) : null,
       f.last_error ? h('p', { class: 'small' }, `⚠️ Последнее обновление остановлено: ${f.last_error}${/подождать/.test(f.last_error) ? '. Нажмите «Загрузить всю ленту» позже — продолжится с того же места.' : ''}`) : null,
-      reportBox(f), hiddenNote(f), checkBox(f.last_check));
+      reportBox(f), auditBox(f), hiddenNote(f), checkBox(f.last_check));
   }).catch(() => mount(box, h('p', { class: 'muted small' }, 'Статус недоступен.')));
   const toggle = h('label', { class: 'check' },
     h('input', { type: 'checkbox', checked: !!s.f95, disabled: !s.adultTags, onchange: e => { save({ f95: e.target.checked }); toast('Сохранено'); } }),
     h('span', {}, 'Показывать западные игры из каталога F95Zone'));
-  if (s.adultTags) load();
+  if (s.adultTags) {
+    load();
+    // a job started earlier (or before the page was reopened) keeps its progress and Stop button
+    api.status().then(st => { if (st.import && st.import.running && EXT_JOBS.includes(st.import.kind)) watchJob(job, load); }).catch(() => {});
+  }
   const btn = (text, title, start) => h('button', { class: 'btn', disabled: !s.adultTags, title, onclick: () => runJob(job, start, load) }, text);
   return h('div', {},
     h('h3', {}, 'F95Zone'),
@@ -146,7 +188,7 @@ export function extSettings() {
     h('div', { class: 'toolbar' },
       btn('Обновить', 'Новые страницы ленты, пока две подряд не принесут ничего нового', () => api.extRefresh(false)),
       btn('Загрузить всю ленту', 'Все страницы ленты; прерванная загрузка продолжится с места остановки', () => api.extRefresh(true)),
-      btn('Сверить с форумом', 'Все страницы списка тем форума Games: находит игры, которых нет в ленте', () => api.extAudit()),
+      btn('Сверить с форумом', 'Два этапа: список тем форума Games, затем страницы тем, которых не было в ленте. Продолжает с места остановки', () => api.extAudit()),
       btn('Проверить подключение', 'Около 7 запросов: лента, форум и три страницы игр', () => api.extCheck())),
     h('p', { class: 'muted small' }, 'Приложение читает только публичную ленту обновлений, список тем форума Games и страницы игр, не чаще одного запроса в 3 секунды. ' +
       'Если сайт говорит «слишком много запросов», приложение ждёт столько, сколько он просит (обычно 15 минут), и продолжает медленнее. ' +

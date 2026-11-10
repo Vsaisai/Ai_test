@@ -117,37 +117,52 @@ fn rematch(
     Ok(())
 }
 
+/// The callbacks of a run, wired to the job's log, its progress and the Stop button.
+/// `stages` is the job's stage list (see `stages_of`): progress of a stage shows its position.
+fn with_run<T>(
+    st: &AppState,
+    log: &vndb_core::progress::Reporter,
+    stages: &'static [&'static str],
+    f: impl FnOnce(&ext::Run) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let run = ext::Run {
+        log: &|m: &str| log.log(m),
+        progress: &|stage, done, total| {
+            let step = stages.iter().position(|s| *s == stage).unwrap_or(0) as u32 + 1;
+            log.progress(vndb_core::progress::Progress {
+                stage,
+                step,
+                steps: stages.len() as u32,
+                done,
+                total,
+                unit: "items",
+            })
+        },
+        stop: &|| st.cancel.load(std::sync::atomic::Ordering::Relaxed),
+    };
+    f(&run)
+}
+
 pub fn start_refresh(state: Arc<AppState>, source: &str, full: bool) -> bool {
     let source = source.to_string();
     start_job(state, "external", move |st, log| {
         let conn = db(st)?;
-        log.stage("external", 1, 2);
+        let stages = vndb_core::progress::stages_of("external");
+        log.stage("external", 1, stages.len() as u32);
         let mut p = provider(&source)?;
-        let rep = ext::refresh(
-            p.as_mut(),
-            &conn,
-            full,
-            // only a safety limit: the feed's own page count decides
-            5000,
-            &|m: &str| log.log(m),
-            &|done, total| {
-                log.progress(vndb_core::progress::Progress {
-                    stage: "external",
-                    step: 1,
-                    steps: 2,
-                    done,
-                    total,
-                    unit: "items",
-                })
-            },
-        )?;
+        // 5000 pages is only a safety limit: the feed's own page count decides
+        let rep = with_run(st, log, stages, |run| {
+            ext::refresh(p.as_mut(), &conn, full, 5000, run)
+        })?;
         log.log(&format!(
             "Найдено релизов: {}, новых: {}, обновлённых: {}, без изменений: {}, скрыто правилами: {}, ошибок: {}, повторов: {}",
             rep.discovered, rep.new, rep.updated, rep.unchanged, rep.hidden_by_policy, rep.errors, rep.repeats
         ));
-        log.stage("matching", 2, 2);
+        log.stage("matching", stages.len() as u32, stages.len() as u32);
         rematch(st, &conn, &source, &|m: &str| log.log(m))?;
-        if let Some(why) = rep.stopped {
+        if rep.cancelled {
+            log.log("Остановлено. Следующий запуск продолжит с того же места.");
+        } else if let Some(why) = rep.stopped {
             // what was read is kept; the job reports the reason
             anyhow::bail!("{why}");
         }
@@ -159,13 +174,14 @@ pub fn start_refresh(state: Arc<AppState>, source: &str, full: bool) -> bool {
 pub struct AuditReq {
     #[serde(default = "f95")]
     source: String,
-    /// Game pages to read for threads found only in the forum (tags check), per run
+    /// Thread pages to read per run for threads found only in the forum (tag check)
     #[serde(default = "check_limit")]
     check_limit: usize,
 }
 
 fn check_limit() -> usize {
-    300
+    // all of them: the stage shows its progress, can be stopped and goes on next time
+    5000
 }
 
 pub async fn audit(State(s): St, Json(req): Json<AuditReq>) -> ApiResult<Value> {
@@ -174,37 +190,39 @@ pub async fn audit(State(s): St, Json(req): Json<AuditReq>) -> ApiResult<Value> 
     let limit = req.check_limit.min(5000);
     let started = start_job(s, "external-audit", move |st, log| {
         let conn = db(st)?;
-        log.stage("external-audit", 1, 2);
+        let stages = vndb_core::progress::stages_of("external-audit");
+        log.stage("external-audit", 1, stages.len() as u32);
         let mut p = provider(&source)?;
-        let rep = ext::audit(
-            p.as_mut(),
-            &conn,
-            20_000,
-            limit,
-            &|m: &str| log.log(m),
-            &|done, total| {
-                log.progress(vndb_core::progress::Progress {
-                    stage: "external-audit",
-                    step: 1,
-                    steps: 2,
-                    done,
-                    total,
-                    unit: "items",
-                })
-            },
-        )?;
+        let rep = with_run(st, log, stages, |run| {
+            ext::audit(p.as_mut(), &conn, 20_000, limit, run)
+        })?;
         log.log(&format!(
-            "Тем в форуме: {}, уже были в каталоге: {}, не было в ленте: {}, проверено страниц: {}, ошибок: {}",
-            rep.index_threads, rep.already_in_catalog, rep.missing_added, rep.checked, rep.errors
+            "Тем в форуме: {}, уже были в каталоге: {}, не было в ленте: {}, прочитано страниц тем: {}, осталось прочитать: {}, ошибок: {}",
+            rep.index_threads, rep.already_in_catalog, rep.missing_added, rep.checked, rep.pending, rep.errors
         ));
-        log.stage("matching", 2, 2);
+        log.stage("matching", stages.len() as u32, stages.len() as u32);
         rematch(st, &conn, &source, &|m: &str| log.log(m))?;
-        if let Some(why) = rep.stopped {
+        if rep.cancelled {
+            log.log("Остановлено. Следующий запуск продолжит с того же места.");
+        } else if let Some(why) = rep.stopped {
             anyhow::bail!("{why}");
         }
         Ok(false)
     });
     Ok(Json(json!({ "started": started })))
+}
+
+/// Ask the running job to stop after its current request (F95Zone jobs listen to it).
+pub async fn stop(State(s): St) -> ApiResult<Value> {
+    let (running, kind) = {
+        let j = s.import.lock().unwrap_or_else(PoisonError::into_inner);
+        (j.running, j.kind.clone())
+    };
+    let ours = running && kind.starts_with("external");
+    if ours {
+        s.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    Ok(Json(json!({ "stopping": ours })))
 }
 
 /// The short test against the real site (about 7 requests).

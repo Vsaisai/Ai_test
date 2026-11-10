@@ -55,6 +55,7 @@ const ADDED: &[(&str, &str)] = &[
     ("match_manual", "INTEGER NOT NULL DEFAULT 0"),
     ("found_via", "TEXT NOT NULL DEFAULT 'feed'"),
     ("needs_check", "INTEGER NOT NULL DEFAULT 0"),
+    ("check_fails", "INTEGER NOT NULL DEFAULT 0"),
 ];
 
 fn migrate(conn: &Connection) -> Result<()> {
@@ -414,13 +415,39 @@ pub fn is_blocked(conn: &Connection, source: &str, ext_id: &str) -> Result<bool>
 pub fn unchecked(conn: &Connection, source: &str, limit: usize) -> Result<Vec<String>> {
     let mut st = conn.prepare(
         "SELECT ext_id FROM ext_games WHERE source = ?1 AND needs_check = 1 AND blocked = 0
-         ORDER BY listed_at LIMIT ?2",
+           AND check_fails < ?3
+         ORDER BY listed_at, ext_id LIMIT ?2",
     )?;
     let out = st
-        .query_map(params![source, limit as i64], |r| r.get(0))?
+        .query_map(params![source, limit as i64, MAX_CHECK_FAILS], |r| r.get(0))?
         .filter_map(Result::ok)
         .collect();
     Ok(out)
+}
+
+/// How many threads found in the forum still wait for their page to be read.
+pub fn unchecked_count(conn: &Connection, source: &str) -> Result<usize> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM ext_games WHERE source = ?1 AND needs_check = 1 AND blocked = 0
+           AND check_fails < ?2",
+        params![source, MAX_CHECK_FAILS],
+        |r| r.get::<_, i64>(0),
+    )? as usize)
+}
+
+/// A thread whose page failed this many times is no longer asked for (it stays stored and
+/// hidden, and is counted as "could not be read").
+pub const MAX_CHECK_FAILS: i64 = 3;
+
+/// The thread's page could not be read: count it and move the thread to the end of the queue,
+/// so one broken thread does not hold up the others.
+pub fn mark_check_failed(conn: &Connection, source: &str, ext_id: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE ext_games SET listed_at = ?3, check_fails = check_fails + 1
+         WHERE source = ?1 AND ext_id = ?2",
+        params![source, ext_id, now()],
+    )?;
+    Ok(())
 }
 
 /// Every stored id of a source (hidden ones included), for the forum comparison.
@@ -627,6 +654,8 @@ pub struct Stats {
     pub weak_matches: usize,
     pub with_details: usize,
     pub needs_check: usize,
+    /// Threads whose page could not be read after several tries (stored, not shown)
+    pub check_failed: usize,
     pub hidden_by_policy: usize,
     /// Hidden records by reason (tag)
     pub hidden_reasons: HashMap<String, usize>,
@@ -672,7 +701,12 @@ pub fn stats(conn: &Connection, source: &str) -> Result<Stats> {
             "{VISIBLE} AND match_manual = 0 AND match_kind = 'title'"
         ))?,
         with_details: n(&format!("{VISIBLE} AND details_at IS NOT NULL"))?,
-        needs_check: n("blocked = 0 AND needs_check = 1")?,
+        needs_check: n(&format!(
+            "blocked = 0 AND needs_check = 1 AND check_fails < {MAX_CHECK_FAILS}"
+        ))?,
+        check_failed: n(&format!(
+            "blocked = 0 AND needs_check = 1 AND check_fails >= {MAX_CHECK_FAILS}"
+        ))?,
         hidden_by_policy: n("blocked = 1")?,
         hidden_reasons: reasons,
         duplicates: duplicate_count(conn, source)?,
