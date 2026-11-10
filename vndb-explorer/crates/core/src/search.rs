@@ -469,8 +469,7 @@ pub fn search(cat: &Catalog, req: &SearchRequest) -> Result<SearchResponse> {
             }
         }
         Sort::Rating => rating(b)
-            .partial_cmp(&rating(a))
-            .unwrap()
+            .total_cmp(&rating(a))
             .then(b.v.votecount.cmp(&a.v.votecount)),
         Sort::Votes => {
             b.v.votecount

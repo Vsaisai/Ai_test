@@ -794,7 +794,10 @@ async fn tag_detail(State(s): St, Path(id): Path<String>) -> ApiResult<Value> {
         .tree
         .resolve(&id)
         .map_err(|e| ApiError(StatusCode::NOT_FOUND, e.to_string()))?;
-    let t = c.tree.get(id).unwrap();
+    let t = c
+        .tree
+        .get(id)
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "no such tag".into()))?;
     let desc: String = c
         .connection()?
         .query_row("SELECT description FROM tags WHERE id = ?1", [id], |r| {
@@ -911,7 +914,11 @@ async fn shelves_overview(State(s): St, body: Option<Json<ShelvesReq>>) -> ApiRe
                     })
                 })
                 .collect();
-            handles.into_iter().flat_map(|h| h.join().unwrap()).collect()
+            // a shelf whose search failed is left out instead of failing the whole page
+            handles
+                .into_iter()
+                .flat_map(|h| h.join().unwrap_or_default())
+                .collect()
         });
         let mut sections: Vec<Value> = shelves
             .sections
@@ -958,7 +965,7 @@ async fn shelf_page(
     let shelf = s
         .shelves
         .read()
-        .unwrap()
+        .unwrap_or_else(PoisonError::into_inner)
         .find(&id)
         .cloned()
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("no shelf {id}")))?;
@@ -1004,7 +1011,7 @@ async fn random(State(s): St, Json(req): Json<SearchRequest>) -> ApiResult<Value
         }
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .subsec_nanos() as usize;
         r.offset = nanos % total;
         let res = vndb_core::search(&c, &r)?;
@@ -1298,6 +1305,13 @@ async fn save_profile(State(s): St, Json(req): Json<ProfileReq>) -> ApiResult<Va
     Ok(Json(json!({ "saved": true })))
 }
 
+/// Longest note kept for a novel (longer text is cut at a character boundary).
+const NOTE_MAX_CHARS: usize = 5000;
+
+fn clip_note(note: Option<&String>) -> Option<String> {
+    note.map(|n| n.chars().take(NOTE_MAX_CHARS).collect())
+}
+
 #[derive(Deserialize)]
 struct MarkReq {
     status: String,
@@ -1321,12 +1335,12 @@ async fn set_mark(
     }
     s.user
         .lock()
-        .unwrap()
+        .unwrap_or_else(PoisonError::into_inner)
         .execute(
             "INSERT INTO marks(vid, status, note, updated) VALUES (?1, ?2, ?3, datetime('now'))
              ON CONFLICT(vid) DO UPDATE SET status = excluded.status,
                note = CASE WHEN ?4 THEN marks.note ELSE excluded.note END, updated = excluded.updated",
-            rusqlite::params![vid, m.status, m.note, m.keep_note],
+            rusqlite::params![vid, m.status, clip_note(m.note.as_ref()), m.keep_note],
         )
         .map_err(anyhow::Error::from)?;
     Ok(Json(json!({ "ok": true })))
@@ -1433,7 +1447,7 @@ async fn my_import(State(s): St, Json(req): Json<MyImport>) -> ApiResult<Value> 
             Some(_) => {
                 tx.execute(
                     "UPDATE marks SET status = ?2, note = ?3, updated = ?4 WHERE vid = ?1",
-                    rusqlite::params![vid, m.status, m.note, when],
+                    rusqlite::params![vid, m.status, clip_note(m.note.as_ref()), when],
                 )
                 .map_err(anyhow::Error::from)?;
                 updated += 1;
@@ -1441,7 +1455,7 @@ async fn my_import(State(s): St, Json(req): Json<MyImport>) -> ApiResult<Value> 
             None => {
                 tx.execute(
                     "INSERT INTO marks(vid, status, note, updated) VALUES (?1, ?2, ?3, ?4)",
-                    rusqlite::params![vid, m.status, m.note, when],
+                    rusqlite::params![vid, m.status, clip_note(m.note.as_ref()), when],
                 )
                 .map_err(anyhow::Error::from)?;
                 added += 1;
@@ -1458,7 +1472,7 @@ async fn delete_mark(State(s): St, Path(id): Path<String>) -> ApiResult<Value> {
     let vid = parse_vid(&id)?;
     s.user
         .lock()
-        .unwrap()
+        .unwrap_or_else(PoisonError::into_inner)
         .execute("DELETE FROM marks WHERE vid = ?1", [vid])
         .map_err(anyhow::Error::from)?;
     Ok(Json(json!({ "ok": true })))

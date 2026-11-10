@@ -558,7 +558,7 @@ pub struct AuditReport {
 
 /// A finished walk over the index is reused for this long: a second run only reads the pages
 /// of threads still waiting for their tag check.
-pub const INDEX_FRESH_SECS: u64 = 24 * 3600;
+pub const INDEX_FRESH_SECS: u64 = 7 * 24 * 3600;
 
 /// Compare the catalog with the provider's own index of every game (for F95Zone: the list of
 /// threads of the Games forum), in two stages:

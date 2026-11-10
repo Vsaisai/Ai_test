@@ -424,7 +424,12 @@ fn vndb_link(url: &str) -> Option<(char, u32)> {
         .trim_start_matches("vndb.org");
     let rest = rest.strip_prefix('/')?.trim_end_matches('/');
     let kind = rest.chars().next()?;
-    let id = rest[1..].split(['#', '?', '/', '.']).next()?.parse().ok()?;
+    // the first character may be longer than one byte (a link such as "/é…")
+    let id = rest[kind.len_utf8()..]
+        .split(['#', '?', '/', '.'])
+        .next()?
+        .parse()
+        .ok()?;
     Some((kind, id))
 }
 
@@ -902,6 +907,16 @@ pub fn detail(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn links_with_non_ascii_paths_do_not_break_parsing() {
+        assert_eq!(vndb_link("/g12"), Some(('g', 12)));
+        assert_eq!(vndb_link("https://vndb.org/v5/"), Some(('v', 5)));
+        // used to cut the first character in half
+        assert_eq!(vndb_link("/é12"), Some(('é', 12)));
+        assert_eq!(vndb_link("/–"), None);
+        assert_eq!(vndb_link(""), None);
+    }
 
     fn rel(official: bool, freeware: bool, lang: &str, links: &[(&str, &str)]) -> Release {
         Release {
