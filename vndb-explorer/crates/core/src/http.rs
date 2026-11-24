@@ -5,7 +5,7 @@ use std::time::Duration;
 
 pub fn user_agent() -> String {
     format!(
-        "vndb-explorer/{} (+https://github.com/Vsaisai/Ai_test)",
+        "vndb-explorer/{} (+https://gitlab.com/Asgefka/Ai_test)",
         crate::app_version()
     )
 }

@@ -1034,11 +1034,13 @@ function relName(r) {
 export async function viewMy(root, status) {
   root.append(spinner());
   try {
-    const my = await api.my();
+    const my = await api.my(extOn());
     const current = status && MARKS[status] ? status : null;
     const counts = {};
     for (const m of my.marks) counts[m.status] = (counts[m.status] || 0) + 1;
-    const ids = my.marks.filter(m => !current || m.status === current).map(m => Number(m.id.slice(1)));
+    const selected = my.marks.filter(m => !current || m.status === current);
+    const external = selected.filter(m => m.id.startsWith('f95-'));
+    const ids = selected.filter(m => m.id.startsWith('v')).map(m => Number(m.id.slice(1)));
     const MY_SORTS = { given: 'Недавно отмеченные', title: 'По алфавиту', rating: 'Рейтинг', votes: 'Популярные', newest: 'Новые', shortest: 'Короткие', longest: 'Длинные' };
     const sort = MY_SORTS[settings().mySort] ? settings().mySort : 'given';
     const sortSel = h('select', { 'aria-label': 'Сортировка', onchange: e => { save({ mySort: e.target.value }); viewMy(root, status); } },
@@ -1052,7 +1054,14 @@ export async function viewMy(root, status) {
       ids.length
         ? [h('div', { class: 'toolbar' }, sortSel),
           resultGrid(offset => api.search({ ...baseRequest(), lang_mode: 'any', ero: 'show', ids, sort, offset, limit: 48 }))]
-        : h('p', { class: 'muted center' }, 'Здесь пусто. Откройте любую новеллу и нажмите «Хочу», «Читаю» и т.д.'),
+        : external.length ? null : h('p', { class: 'muted center' }, 'Здесь пусто. Откройте любую новеллу и нажмите «Хочу», «Читаю» и т.д.'),
+      external.length ? h('section', { class: 'panel' }, h('h2', {}, 'F95Zone'),
+        external.map(m => h('p', {},
+          m.title ? h('a', { href: `#/f95/${m.id.slice(4)}` }, m.title) : `Тема #${m.id.slice(4)} · нет в локальном каталоге`,
+          ' · ', MARKS[m.status]?.label, ' ',
+          h('button', { class: 'btn', onclick: async () => {
+            try { await api.unmark(m.id); await viewMy(root, status); } catch (e) { toast(e.message); }
+          } }, 'Убрать с полки')))) : null,
       shelvesFileBox(() => viewMy(root, status)),
     );
   } catch (e) {

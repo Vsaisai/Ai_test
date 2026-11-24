@@ -177,8 +177,8 @@ pub struct AppState {
     pub http: reqwest::Client,
     /// Set by "Stop": long external jobs end after their current request
     pub cancel: std::sync::atomic::AtomicBool,
-    /// VNDB match index for external games: (catalog imported_at, index)
-    pub ext_index: Mutex<Option<(String, Arc<vndb_core::external::matching::Index>)>>,
+    /// Each import or sync installs a new catalog instance, even within the same second.
+    pub ext_index: Mutex<Option<(std::sync::Weak<Catalog>, Arc<vndb_core::external::matching::Index>)>>,
 }
 
 /// Open the personal database; a damaged file is kept as `user.sqlite.broken-<time>` and a new
@@ -316,7 +316,7 @@ impl AppState {
 
     fn marks(&self) -> HashMap<String, String> {
         let c = self.user.lock().unwrap_or_else(PoisonError::into_inner);
-        let Ok(mut st) = c.prepare("SELECT vid, status FROM marks") else {
+        let Ok(mut st) = c.prepare("SELECT vid, status FROM marks WHERE vid >= 0") else {
             return HashMap::new();
         };
         st.query_map([], |r| {
@@ -543,6 +543,7 @@ pub fn start_job(
                     .catalog
                     .write()
                     .unwrap_or_else(PoisonError::into_inner) = Some(Arc::new(c));
+                external::match_reloaded_catalog(&state, &log)?;
             }
             Ok(())
         });
@@ -1204,21 +1205,53 @@ async fn vn_prices(
 
 const STATUSES: &[&str] = &["wish", "playing", "finished", "dropped", "favorite"];
 
-async fn my_list(State(s): St) -> ApiResult<Value> {
-    let u = s.user.lock().unwrap_or_else(PoisonError::into_inner);
-    let mut st = u
-        .prepare("SELECT vid, status, note, updated FROM marks ORDER BY updated DESC")
-        .map_err(anyhow::Error::from)?;
-    let rows: Vec<Value> = st
-        .query_map([], |r| {
-            Ok(
-                json!({ "id": format!("v{}", r.get::<_, u32>(0)?), "status": r.get::<_, String>(1)?,
-                       "note": r.get::<_, Option<String>>(2)?, "updated": r.get::<_, String>(3)? }),
-            )
-        })
-        .map_err(anyhow::Error::from)?
-        .filter_map(Result::ok)
-        .collect();
+// Existing VNDB rows keep their numeric keys. F95 thread IDs occupy the negative range.
+fn shelf_key(id: &str) -> Result<i64, ApiError> {
+    if let Some(thread) = id.strip_prefix("f95-") {
+        let n = thread.parse::<u32>().ok().filter(|n| *n > 0 && n.to_string() == thread)
+            .ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "bad F95 thread id".into()))?;
+        return Ok(-i64::from(n));
+    }
+    parse_vid(id).map(i64::from)
+}
+
+fn shelf_id(key: i64) -> String {
+    if key < 0 { format!("f95-{}", key.unsigned_abs()) } else { format!("v{key}") }
+}
+
+#[derive(Deserialize)]
+struct MyListQuery {
+    #[serde(default)]
+    external: bool,
+}
+
+async fn my_list(State(s): St, Query(q): Query<MyListQuery>) -> ApiResult<Value> {
+    let mut rows: Vec<Value> = {
+        let u = s.user.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut st = u
+            .prepare("SELECT vid, status, note, updated FROM marks WHERE vid >= 0 OR ?1 ORDER BY updated DESC")
+            .map_err(anyhow::Error::from)?;
+        let rows = st
+            .query_map([q.external], |r| {
+                Ok(
+                    json!({ "id": shelf_id(r.get::<_, i64>(0)?), "status": r.get::<_, String>(1)?,
+                           "note": r.get::<_, Option<String>>(2)?, "updated": r.get::<_, String>(3)? }),
+                )
+            })
+            .map_err(anyhow::Error::from)?
+            .collect::<rusqlite::Result<Vec<_>>>().map_err(anyhow::Error::from)?;
+        rows
+    };
+    if rows.iter().any(|m| m["id"].as_str().is_some_and(|id| id.starts_with("f95-"))) && s.data_dir.join("external.sqlite").is_file() {
+        let db = vndb_core::external::store::open(&s.data_dir.join("external.sqlite"))?;
+        for m in &mut rows {
+            if let Some(id) = m["id"].as_str().and_then(|id| id.strip_prefix("f95-")) {
+                if let Some(game) = vndb_core::external::store::get(&db, "f95zone", id)? {
+                    m["title"] = json!(game.game.title);
+                }
+            }
+        }
+    }
     Ok(Json(json!({ "statuses": STATUSES, "marks": rows })))
 }
 
@@ -1235,7 +1268,7 @@ async fn profile(State(s): St) -> ApiResult<Value> {
     let (name, avatar, marks) = {
         let u = s.user.lock().unwrap_or_else(PoisonError::into_inner);
         let mut st = u
-            .prepare("SELECT vid, status FROM marks")
+            .prepare("SELECT vid, status FROM marks WHERE vid >= 0")
             .map_err(anyhow::Error::from)?;
         let marks: Vec<vndb_core::profile::Mark> = st
             .query_map([], |r| {
@@ -1326,7 +1359,7 @@ async fn set_mark(
     Path(id): Path<String>,
     Json(m): Json<MarkReq>,
 ) -> ApiResult<Value> {
-    let vid = parse_vid(&id)?;
+    let vid = shelf_key(&id)?;
     if !STATUSES.contains(&m.status.as_str()) {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
@@ -1355,7 +1388,7 @@ async fn my_export(State(s): St) -> Result<Response, ApiError> {
             .map_err(anyhow::Error::from)?;
         let marks: Vec<Value> = st
             .query_map([], |r| {
-                Ok(json!({ "id": format!("v{}", r.get::<_, u32>(0)?), "status": r.get::<_, String>(1)?,
+                Ok(json!({ "id": shelf_id(r.get::<_, i64>(0)?), "status": r.get::<_, String>(1)?,
                            "note": r.get::<_, Option<String>>(2)?, "updated": r.get::<_, Option<String>>(3)? }))
             })
             .map_err(anyhow::Error::from)?
@@ -1417,13 +1450,16 @@ async fn my_import(State(s): St, Json(req): Json<MyImport>) -> ApiResult<Value> 
     }
     let mut u = s.user.lock().unwrap_or_else(PoisonError::into_inner);
     let tx = u.transaction().map_err(anyhow::Error::from)?;
+    if req.replace && req.marks.iter().any(|m| shelf_key(&m.id).is_err() || !STATUSES.contains(&m.status.as_str())) {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "Файл содержит некорректные отметки. Полки сохранены.".into()));
+    }
     if req.replace {
         tx.execute("DELETE FROM marks", [])
             .map_err(anyhow::Error::from)?;
     }
     let (mut added, mut updated, mut skipped) = (0, 0, 0);
     for m in &req.marks {
-        let Ok(vid) = parse_vid(&m.id) else {
+        let Ok(vid) = shelf_key(&m.id) else {
             skipped += 1;
             continue;
         };
@@ -1469,7 +1505,7 @@ async fn my_import(State(s): St, Json(req): Json<MyImport>) -> ApiResult<Value> 
 }
 
 async fn delete_mark(State(s): St, Path(id): Path<String>) -> ApiResult<Value> {
-    let vid = parse_vid(&id)?;
+    let vid = shelf_key(&id)?;
     s.user
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -1606,6 +1642,17 @@ async fn static_file(State(s): St, uri: Uri) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn shelf_keys_round_trip_without_collisions() {
+        for (id, key) in [("v42", 42), ("f95-42", -42), ("f95-4294967295", -4294967295)] {
+            assert_eq!(super::shelf_key(id).ok(), Some(key));
+            assert_eq!(super::shelf_id(key), id);
+        }
+        for id in ["f95-0", "f95--1", "f95-4294967296", "f95-01"] {
+            assert!(super::shelf_key(id).is_err());
+        }
+    }
+
     #[test]
     fn image_cache_is_trimmed_oldest_first() {
         let dir = std::env::temp_dir().join(format!("vnshelf-prune-{}", std::process::id()));

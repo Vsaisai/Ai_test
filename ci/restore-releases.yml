@@ -1,0 +1,13 @@
+restore-release-files:
+  stage: build
+  needs: []
+  image: python:3.12-bookworm
+  cache: []
+  before_script: []
+  resource_group: legacy-release-import
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "beta" && $CI_PIPELINE_SOURCE == "push"'
+      changes: [ci/legacy-assets.sha256, ci/import-release-assets.py, ci/restore-releases.yml]
+    - if: '$CI_COMMIT_BRANCH == "beta" && $CI_PIPELINE_SOURCE == "web" && $RESTORE_RELEASE_FILES == "1"'
+  script:
+    - python ci/import-release-assets.py

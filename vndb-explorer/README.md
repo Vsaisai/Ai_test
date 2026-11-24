@@ -52,9 +52,9 @@
 
 ## Готовые сборки
 
-В [GitHub Releases](https://github.com/Vsaisai/Ai_test/releases):
+Ссылки на сборки Windows, Linux и Android — в [разделе «Скачать»](../README.md#скачать).
 
-* **ПК** (`pc-v*`): zip для Windows x64, Linux x64 и macOS (Apple Silicon). Распаковать и запустить
+* **ПК** (`pc-v*`): ZIP для Windows x64 и Linux x64. Для macOS (Apple Silicon) соберите ZIP локально по инструкции ниже. Распаковать и запустить
   `Start VN Shelf.bat` / `./start-vn-shelf.sh` / `Start VN Shelf.command` — поднимется сервер и
   откроется окно приложения. Внутри две папки:
   * `server/` — `vndb-web`, скрипты запуска (локально / для телефона в Wi-Fi), `data/` с базой и вашими полками;
@@ -62,8 +62,7 @@
     `cli/vndb-explorer` (консольный клиент).
 * **Android** (`mobile-v*`): APK, см. [docs/MOBILE.md](docs/MOBILE.md).
 
-Сборки создаёт GitHub Actions: `.github/workflows/desktop.yml` — при пуше в `beta`, если для номера из
-`vndb-explorer/VERSION` ещё нет релиза. Локально: `cargo build --release -p vndb-web -p vndb-explorer`
+Релиз ПК публикует GitLab CI по тегу `pc-v<версия>` из ветки `beta`. Локально: `cargo build --release -p vndb-web -p vndb-explorer`
 и `./desktop/package.sh linux-x64` (или `windows-x64`, `macos-arm64`).
 
 ## Быстрый старт (из исходников)
@@ -180,7 +179,7 @@ vndb-explorer/
 
 ### Мобильное приложение
 
-Ветка `mobile`: автономное Android-приложение (APK в GitHub Releases, теги `mobile-v*`) — вся база
+Ветка `mobile`: автономное Android-приложение (APK в GitLab, теги `mobile-v*`) — вся база
 на телефоне, новые релизы подтягиваются сами. Подробности и сборка — [docs/MOBILE.md](docs/MOBILE.md).
 
 ## Консольный клиент

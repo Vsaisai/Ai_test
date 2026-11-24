@@ -8,7 +8,7 @@
 //! 3. **title+developer** — the title and the developer name match;
 //! 4. **title** — the title matches exactly one adult VN.
 
-use super::store::{self, Stored};
+use super::store;
 use super::{official_site, ExtGame};
 use crate::catalog::Catalog;
 use anyhow::Result;
@@ -196,21 +196,7 @@ impl Index {
 
 /// Re-match every stored game; returns how many are linked to VNDB.
 pub fn match_all(conn: &Connection, idx: &Index) -> Result<usize> {
-    let games: Vec<Stored> = store::all(conn)?;
-    let tx = conn.unchecked_transaction()?;
-    let mut matched = 0;
-    for s in &games {
-        let m = idx.find(&s.game);
-        if m.is_some() {
-            matched += 1;
-        }
-        let (vid, kind) = (m.map(|x| x.0), m.map(|x| x.1));
-        if vid != s.vndb_id || kind != s.match_kind.as_deref() {
-            store::set_match(&tx, &s.game.source, &s.game.ext_id, vid, kind)?;
-        }
-    }
-    tx.commit()?;
-    Ok(matched)
+    store::rematch(conn, idx)
 }
 
 #[cfg(test)]

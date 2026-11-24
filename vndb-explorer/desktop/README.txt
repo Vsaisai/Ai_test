@@ -49,4 +49,4 @@ client/                     клиент
 Windows может показать предупреждение SmartScreen (программа не подписана):
 «Подробнее» → «Выполнить в любом случае».
 
-Данные: VNDB (https://vndb.org), лицензия ODbL. Исходный код: https://github.com/Vsaisai/Ai_test
+Данные: VNDB (https://vndb.org), лицензия ODbL. Исходный код: https://gitlab.com/Asgefka/Ai_test

@@ -36,14 +36,14 @@ fn index(s: &AppState) -> Option<Arc<Index>> {
         .clone()?;
     let mut slot = s.ext_index.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some((stamp, idx)) = slot.as_ref() {
-        if *stamp == cat.imported_at {
+        if stamp.ptr_eq(&Arc::downgrade(&cat)) {
             return Some(idx.clone());
         }
     }
     match Index::build(&cat) {
         Ok(idx) => {
             let idx = Arc::new(idx);
-            *slot = Some((cat.imported_at.clone(), idx.clone()));
+            *slot = Some((Arc::downgrade(&cat), idx.clone()));
             Some(idx)
         }
         Err(e) => {
@@ -113,6 +113,15 @@ fn rematch(
         rep.in_vndb = Some(stats.in_vndb);
         rep.duplicates = stats.duplicates;
         store::set_meta(conn, source, "last_report", &serde_json::to_string(&rep)?)?;
+    }
+    Ok(())
+}
+
+pub(super) fn match_reloaded_catalog(s: &AppState, log: &dyn Fn(&str)) -> anyhow::Result<()> {
+    if !s.data_dir.join("external.sqlite").is_file() { return Ok(()); }
+    let conn = db(s)?;
+    if conn.query_row("SELECT EXISTS(SELECT 1 FROM ext_games)", [], |r| r.get::<_,bool>(0))? {
+        rematch(s, &conn, f95zone::ID, log)?;
     }
     Ok(())
 }
@@ -397,6 +406,12 @@ pub async fn game(
             ));
         };
         let mut v = json!(game);
+        let key = super::shelf_key(&format!("f95-{id}"))?;
+        use rusqlite::OptionalExtension;
+        let mark: Option<String> = s.user.lock().unwrap_or_else(PoisonError::into_inner)
+            .query_row("SELECT status FROM marks WHERE vid = ?1", [key], |r| r.get(0))
+            .optional().map_err(anyhow::Error::from)?;
+        v["mark"] = json!(mark);
         v["details_error"] = json!(details_error);
         if let Some(vid) = game.vndb_id {
             let cat = s

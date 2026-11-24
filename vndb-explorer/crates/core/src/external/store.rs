@@ -59,21 +59,37 @@ const ADDED: &[(&str, &str)] = &[
 ];
 
 fn migrate(conn: &Connection) -> Result<()> {
-    conn.execute_batch(SCHEMA)?;
-    let have: Vec<String> = conn
+    use rusqlite::functions::FunctionFlags;
+    let flags = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC;
+    conn.create_scalar_function("vn_norm", 1, flags, |ctx| {
+        Ok(super::matching::norm(&ctx.get::<String>(0)?))
+    })?;
+    conn.create_scalar_function("vn_lower", 1, flags, |ctx| {
+        Ok(ctx.get::<String>(0)?.to_lowercase())
+    })?;
+    let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    if version >= 1 { return Ok(()); }
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+    tx.execute_batch(SCHEMA)?;
+    let have: Vec<String> = tx
         .prepare("SELECT name FROM pragma_table_info('ext_games')")?
         .query_map([], |r| r.get(0))?
         .filter_map(Result::ok)
         .collect();
     for (col, ty) in ADDED {
         if !have.iter().any(|c| c == col) {
-            conn.execute_batch(&format!("ALTER TABLE ext_games ADD COLUMN {col} {ty}"))?;
+            tx.execute_batch(&format!("ALTER TABLE ext_games ADD COLUMN {col} {ty}"))?;
         }
     }
+    tx.execute_batch(&format!(
+        "CREATE INDEX IF NOT EXISTS ext_recent ON ext_games(source, updated DESC, ext_id) WHERE {VISIBLE}"
+    ))?;
     // first version kept nothing but the id of hidden games
-    conn.execute_batch(
+    tx.execute_batch(
         "UPDATE ext_games SET hidden_reason = 'policy' WHERE blocked = 1 AND hidden_reason IS NULL",
     )?;
+    tx.pragma_update(None, "user_version", 1)?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -473,11 +489,76 @@ pub fn for_vndb(conn: &Connection, vid: u32) -> Result<Vec<Stored>> {
     Ok(out)
 }
 
-/// Every visible game.
-pub fn all(conn: &Connection) -> Result<Vec<Stored>> {
-    let mut st = conn.prepare(&format!("SELECT {COLS} FROM ext_games WHERE {VISIBLE}"))?;
-    let out = st.query_map([], row)?.filter_map(Result::ok).collect();
-    Ok(out)
+/// Recompute unlocked matches in bounded batches. Keyset pagination is stable while the
+/// transaction updates match fields, and the projection reads only evidence used by the index.
+pub fn rematch(conn: &Connection, idx: &super::matching::Index) -> Result<usize> {
+    let tx = conn.unchecked_transaction()?;
+    let mut cursor = (String::new(), String::new());
+    let mut matched = 0;
+    loop {
+        let sql = format!("SELECT source, ext_id, title, developer, links, vndb_id, match_kind
+            FROM ext_games WHERE {VISIBLE} AND match_manual=0 AND (source,ext_id) > (?1,?2)
+            ORDER BY source, ext_id LIMIT 256");
+        let rows = tx.prepare_cached(&sql)?.query_map(params![cursor.0, cursor.1], |r| {
+            let game = ExtGame {
+                source: r.get(0)?, ext_id: r.get(1)?, title: r.get(2)?, developer: r.get(3)?,
+                links: serde_json::from_str(&r.get::<_,String>(4)?).unwrap_or_default(),
+                ..Default::default()
+            };
+            Ok((game, r.get::<_, Option<u32>>(5)?, r.get::<_, Option<String>>(6)?))
+        })?.collect::<rusqlite::Result<Vec<_>>>()?;
+        if rows.is_empty() { break; }
+        for (g, old_id, old_kind) in rows {
+            let found = idx.find(&g);
+            let vid = found.map(|m| m.0);
+            let kind = found.map(|m| m.1);
+            if vid != old_id || kind != old_kind.as_deref() {
+                set_match(&tx, &g.source, &g.ext_id, vid, kind)?;
+            }
+            matched += usize::from(vid.is_some());
+            cursor = (g.source, g.ext_id);
+        }
+    }
+    tx.commit()?;
+    Ok(matched)
+}
+
+/// Fields used by the list and personal shelves. Details stay on disk until opened.
+#[derive(Debug, Clone, Serialize)]
+pub struct GameCard {
+    pub source: String,
+    pub ext_id: String,
+    pub title: String,
+    pub developer: String,
+    pub version: String,
+    pub status: String,
+    pub engine: String,
+    pub cover: Option<String>,
+    pub updated: Option<String>,
+    pub rating: Option<f32>,
+    pub likes: u32,
+    pub vndb_id: Option<u32>,
+    pub match_kind: Option<String>,
+    pub match_manual: bool,
+}
+
+const CARD_COLS: &str = "source, ext_id, title, developer, version, status, engine, cover, updated,
+    rating, likes, vndb_id, match_kind, match_manual";
+
+fn card_row(r: &Row) -> rusqlite::Result<GameCard> {
+    Ok(GameCard {
+        source: r.get(0)?, ext_id: r.get(1)?, title: r.get(2)?, developer: r.get(3)?,
+        version: r.get(4)?, status: r.get(5)?, engine: r.get(6)?, cover: r.get(7)?,
+        updated: r.get(8)?, rating: r.get::<_,Option<f64>>(9)?.map(|v| v as f32), likes: r.get(10)?, vndb_id: r.get(11)?,
+        match_kind: r.get(12)?, match_manual: r.get(13)?,
+    })
+}
+
+pub fn card(conn: &Connection, source: &str, id: &str) -> Result<Option<GameCard>> {
+    let mut st = conn.prepare_cached(&format!(
+        "SELECT {CARD_COLS} FROM ext_games WHERE source=?1 AND ext_id=?2 AND {VISIBLE}"
+    ))?;
+    Ok(st.query_row([source, id], card_row).optional()?)
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
@@ -506,7 +587,7 @@ pub struct Page {
     pub total: usize,
     pub page: u32,
     pub per_page: u32,
-    pub items: Vec<Stored>,
+    pub items: Vec<GameCard>,
 }
 
 pub fn search(conn: &Connection, q: &Query) -> Result<Page> {
@@ -516,79 +597,62 @@ pub fn search(conn: &Connection, q: &Query) -> Result<Page> {
         q.per_page.min(120)
     };
     let page = q.page.max(1);
-    let words: Vec<String> = super::matching::norm(&q.q)
-        .split_whitespace()
-        .map(String::from)
-        .collect();
-    let mut all: Vec<Stored> = all(conn)?
-        .into_iter()
-        .filter(|s| {
-            let g = &s.game;
-            if let Some(src) = &q.source {
-                if &g.source != src {
-                    return false;
-                }
-            }
-            if !words.is_empty() {
-                let hay = format!(
-                    "{} {}",
-                    super::matching::norm(&g.title),
-                    super::matching::norm(&g.developer)
-                );
-                if !words.iter().all(|w| hay.contains(w.as_str())) {
-                    return false;
-                }
-            }
-            let has = |t: &String| g.tags.iter().any(|x| x.eq_ignore_ascii_case(t));
-            if !q.tags.iter().all(has) || q.exclude_tags.iter().any(has) {
-                return false;
-            }
-            if let Some(st) = q.status.as_deref().filter(|s| !s.is_empty()) {
-                if g.status != st {
-                    return false;
-                }
-            }
-            if let Some(en) = q.engine.as_deref().filter(|s| !s.is_empty()) {
-                if !g.engine.eq_ignore_ascii_case(en) {
-                    return false;
-                }
-            }
-            match q.matches.as_deref() {
-                Some("weak") if s.match_manual || s.match_kind.as_deref() != Some("title") => {
-                    return false
-                }
-                Some("manual") if !s.match_manual => return false,
-                Some("none") if s.vndb_id.is_some() => return false,
-                Some("any") if s.vndb_id.is_none() => return false,
-                _ => {}
-            }
-            !(q.only_new && s.vndb_id.is_some())
-        })
-        .collect();
-    match q.sort.as_deref() {
-        Some("rating") => all.sort_by(|a, b| {
-            b.game
-                .rating
-                .unwrap_or(0.0)
-                .total_cmp(&a.game.rating.unwrap_or(0.0))
-                .then(b.game.likes.cmp(&a.game.likes))
-        }),
-        Some("likes") => all.sort_by_key(|b| std::cmp::Reverse(b.game.likes)),
-        Some("title") => all.sort_by_key(|a| a.game.title.to_lowercase()),
-        _ => all.sort_by(|a, b| b.game.updated.cmp(&a.game.updated)),
+    let mut filters = vec![VISIBLE];
+    let mut values = Vec::<String>::new();
+    if let Some(source) = &q.source {
+        filters.push("source = ?");
+        values.push(source.clone());
     }
-    let total = all.len();
-    let items = all
-        .into_iter()
-        .skip(((page - 1) * per_page) as usize)
-        .take(per_page as usize)
-        .collect();
-    Ok(Page {
-        total,
-        page,
-        per_page,
-        items,
-    })
+    let query = super::matching::norm(&q.q);
+    if !query.is_empty() {
+        filters.push("NOT EXISTS (SELECT 1 FROM json_each(?) word
+            WHERE instr(norm_title, word.value) = 0 AND instr(vn_norm(developer), word.value) = 0)");
+        values.push(serde_json::to_string(&query.split_whitespace().collect::<Vec<_>>())?);
+    }
+    // Bind whole sets as JSON: tag names cannot change the query or exceed the bind limit.
+    if !q.tags.is_empty() {
+        filters.push("NOT EXISTS (SELECT 1 FROM json_each(?) wanted WHERE NOT EXISTS
+            (SELECT 1 FROM json_each(ext_games.tags) t WHERE t.value = wanted.value COLLATE NOCASE))");
+        values.push(serde_json::to_string(&q.tags)?);
+    }
+    if !q.exclude_tags.is_empty() {
+        filters.push("NOT EXISTS (SELECT 1 FROM json_each(?) excluded JOIN json_each(ext_games.tags) t
+            ON t.value = excluded.value COLLATE NOCASE)");
+        values.push(serde_json::to_string(&q.exclude_tags)?);
+    }
+    if let Some(status) = q.status.as_ref().filter(|x| !x.is_empty()) {
+        filters.push("status = ?");
+        values.push(status.clone());
+    }
+    if let Some(engine) = q.engine.as_ref().filter(|x| !x.is_empty()) {
+        filters.push("engine = ? COLLATE NOCASE");
+        values.push(engine.clone());
+    }
+    match q.matches.as_deref() {
+        Some("weak") => filters.push("match_manual = 0 AND match_kind = 'title'"),
+        Some("manual") => filters.push("match_manual = 1"),
+        Some("none") => filters.push("vndb_id IS NULL"),
+        Some("any") => filters.push("vndb_id IS NOT NULL"),
+        _ => {}
+    }
+    if q.only_new { filters.push("vndb_id IS NULL"); }
+    let order = match q.sort.as_deref() {
+        Some("rating") => "COALESCE(rating,0) DESC, likes DESC",
+        Some("likes") => "likes DESC",
+        Some("title") => "vn_lower(title)",
+        _ => "updated DESC",
+    };
+    let predicate = filters.join(" AND ");
+    let tx = conn.unchecked_transaction()?;
+    let total = tx.query_row(&format!("SELECT COUNT(*) FROM ext_games WHERE {predicate}"),
+        rusqlite::params_from_iter(&values), |r| r.get(0))?;
+    let offset = i64::from(page - 1) * i64::from(per_page);
+    let sql = format!("SELECT {CARD_COLS} FROM ext_games WHERE {predicate}
+        ORDER BY {order}, ext_id, source LIMIT {per_page} OFFSET {offset}");
+    let items = tx.prepare(&sql)?.query_map(rusqlite::params_from_iter(&values), card_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    tx.commit()?;
+    Ok(Page { total, page, per_page, items })
 }
 
 /// Tags with the number of games (most common first), for the filter.
@@ -932,6 +996,26 @@ mod tests {
         // same title and developer twice: one duplicate
         upsert_listed(&conn, &game("9", "Winter Nights", &["2dcg"]), "feed").unwrap();
         assert_eq!(duplicate_count(&conn, "f95zone").unwrap(), 1);
+    }
+
+    #[test]
+    fn card_search_pages_are_stable_and_details_stay_out_of_the_projection() {
+        let conn = open_memory();
+        for id in ["12", "10", "11"] {
+            let mut g = game(id, "Été", &["3dcg", "Mystery"]);
+            g.developer = "Игры".into();
+            g.description = Some("Only on the detail page".repeat(100));
+            g.updated = Some("2026-11-19".into());
+            upsert_listed(&conn, &g, "feed").unwrap();
+            save_details(&conn, &g).unwrap();
+        }
+        let q = Query { source: Some("f95zone".into()), q: "Ete игры".into(),
+            tags: vec!["mystery".into()], page: 2, per_page: 1, ..Default::default() };
+        let page = search(&conn, &q).unwrap();
+        assert_eq!((page.total, page.items[0].ext_id.as_str()), (3, "11"));
+        let json = serde_json::to_value(&page.items[0]).unwrap();
+        assert!(json.get("description").is_none() && json.get("links").is_none());
+        assert!(search(&conn, &Query { page: u32::MAX, ..q }).unwrap().items.is_empty());
     }
 
     #[test]

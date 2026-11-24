@@ -5,7 +5,8 @@ const KEY = 'vnshelf.settings';
 export const APP_VERSION = (navigator.userAgent.match(/VNShelfApp\/([\w.\-]+)/) || [])[1] || null;
 export const IN_APP = APP_VERSION !== null;
 /** Where mobile releases are published. */
-export const RELEASES_PAGE = 'https://github.com/Vsaisai/Ai_test/releases';
+export const RELEASES_PAGE = 'https://gitlab.com/Asgefka/Ai_test/-/releases';
+export const ANDROID_BUILDS = 'https://gitlab.com/Asgefka/Ai_test/-/jobs/artifacts/mobile/browse?job=android-apk';
 
 export const DEFAULTS = {
   apiBase: '',            // '' = same server; e.g. 'http://192.168.1.10:8080' for a mobile app

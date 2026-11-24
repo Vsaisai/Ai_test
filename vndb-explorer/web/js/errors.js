@@ -23,7 +23,7 @@ export function humanError(text) {
   const t = String(text || '').trim();
   if (!t) return 'Неизвестная ошибка';
   // already readable (our own Russian messages keep their numbers and hints)
-  if (/[А-Яа-яЁё]/.test(t) && !/[A-Za-z]{5}/.test(t.replace(/VNDB|GitHub|dl\.vndb\.org|HTTP/g, ''))) return t[0].toUpperCase() + t.slice(1);
+  if (/[А-Яа-яЁё]/.test(t) && !/[A-Za-z]{5}/.test(t.replace(/VNDB|GitLab|dl\.vndb\.org|HTTP/g, ''))) return t[0].toUpperCase() + t.slice(1);
   for (const [re, msg, detail] of RULES) {
     if (re.test(t)) return detail ? `${msg} (${short(t)})` : msg;
   }

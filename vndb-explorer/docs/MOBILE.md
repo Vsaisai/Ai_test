@@ -2,7 +2,7 @@
 
 ## Готовое Android-приложение (ветка `mobile`)
 
-APK публикуется в [GitHub Releases](https://github.com/Vsaisai/Ai_test/releases) (теги `mobile-v*`).
+Последний APK ветки mobile доступен в [задании android-apk](https://gitlab.com/Asgefka/Ai_test/-/jobs/artifacts/mobile/browse?job=android-apk). Версии с тегами `mobile-v*` перечислены в [GitLab Releases](https://gitlab.com/Asgefka/Ai_test/-/releases).
 Приложение полностью автономное: внутри APK работает тот же Rust-сервер, что и на ПК
 (`crates/mobile` → `libvnshelf.so`), а интерфейс показывается во WebView. Компьютер не нужен.
 
@@ -12,7 +12,7 @@ APK публикуется в [GitHub Releases](https://github.com/Vsaisai/Ai_te
   большие (больше 1 500 новелл / 6 000 релизов / 90 дней с полной загрузки) — по выбору
   в настройках: спросить или обновить полностью самостоятельно.
 * Раз в сутки проверяется, не вышла ли новая версия APK (если репозиторий публичный; для
-  закрытого — кнопка ведёт на страницу релизов).
+  закрытого — кнопка открывает сборки GitLab в браузере).
 * Данные лежат во внутренней памяти приложения и переживают обновление APK.
 
 ### Сборка
@@ -27,18 +27,10 @@ ANDROID_HOME=~/Android/Sdk ANDROID_NDK_HOME=~/Android/Sdk/ndk/27.2.12479018 ./mo
 
 ### Выпуск новой версии
 
-Поменяйте номер в `mobile/VERSION` (`A.B.C` или `A.B.C.D` для мелкой правки, части 0–99) и запушьте ветку `mobile`. Workflow `.github/workflows/android.yml`
-соберёт APK и, если релиза `mobile-v<версия>` ещё нет, создаст его (вместе с тегом). Пуш тега
-`mobile-v*` тоже запускает сборку. По умолчанию APK подписывается
-отладочным ключом из репозитория (`mobile/android/app/debug.keystore`), чтобы обновления ставились
-поверх. Для настоящей подписи добавьте секреты `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`,
-`ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD` (после смены ключа приложение придётся один раз
-переустановить).
-
-Куда выпускать: `mobile/PUBLISH_PUBLIC`. `yes` — релиз создаётся и в открытом `Vsaisai/vnshelf-releases`,
-и приложение у всех предложит обновиться. Любое другое значение — релиз остаётся только в закрытом `Ai_test`,
-APK ставится вручную. Чтобы позже опубликовать такую версию для всех, поставьте `yes` и перезапустите
-workflow `Android APK` (релиз в `Ai_test` уже есть, он не дублируется).
+Обновите `vndb-explorer/mobile/VERSION` в ветке `mobile`. Проверьте APK из успешной сборки.
+Для выпуска создайте на проверенном коммите тег `mobile-v<версия>` с тем же номером.
+GitLab CI соберёт APK, загрузит его в Package Registry и прикрепит ссылку к релизу.
+Для релизного тега нужны переменные подписи. См. [настройки GitLab CI](../../GITLAB.md).
 
 ## Другие варианты
 
@@ -108,18 +100,4 @@ UniFFI или `flutter_rust_bridge`. Модели (`SearchRequest`, `Card`, `Det
 
 ## Обновления приложения
 
-Код лежит в закрытом репозитории, поэтому готовые APK дополнительно публикуются в открытом
-репозитории **`Vsaisai/vnshelf-releases`** (там нет кода, только релизы). Приложение проверяет его без
-токена, поэтому APK можно спокойно отдавать другим людям: никаких секретов внутри нет.
-
-Как это устроено:
-1. `Vsaisai/vnshelf-releases` — публичный репозиторий с README (нужен хотя бы один коммит).
-2. Секрет `VNDB_SECRET` в `Vsaisai/Ai_test` (Settings → Secrets and variables → Actions): fine-grained
-   токен с доступом **только** к `vnshelf-releases`, право Contents: **Read and write**.
-3. Workflow `android.yml` после сборки создаёт релиз `mobile-v<версия>` и там. Токен используется только в CI.
-
-Если что-то не настроено, сборка не падает, а пишет предупреждение в логе шага
-«Publish to the public releases repository».
-
-Приложение само спрашивает открытый репозиторий (из WebView) и скачивает APK по прямой ссылке
-`github.com/…/releases/download/…` — встроенный сервер и токены в этом не участвуют.
+Для закрытого проекта откройте [сборки Android](https://gitlab.com/Asgefka/Ai_test/-/jobs/artifacts/mobile/browse?job=android-apk) в браузере, войдите в GitLab и установите APK поверх прежней версии. Android требует тот же ключ подписи.

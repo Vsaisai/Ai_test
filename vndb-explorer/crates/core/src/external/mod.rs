@@ -295,7 +295,6 @@ fn ingest(
     rep: &mut RefreshReport,
 ) -> anyhow::Result<usize> {
     let mut changed = 0;
-    let tx = conn.unchecked_transaction()?;
     for g in games {
         let key = (g.source.clone(), g.ext_id.clone());
         let again = !seen.insert(key);
@@ -304,7 +303,7 @@ fn ingest(
             rep.repeats += 1;
             continue;
         }
-        match store::upsert_listed(&tx, g, "feed")? {
+        match store::upsert_listed(conn, g, "feed")? {
             // read again (end of a full pass, a retried page): only real changes count
             store::Change::Unchanged | store::Change::Hidden(_) if again => {}
             store::Change::New | store::Change::Updated if again => {
@@ -323,9 +322,24 @@ fn ingest(
             store::Change::Hidden(_) => rep.hidden_by_policy += 1,
         }
     }
-    tx.commit()?;
     rep.discovered = seen.len();
     Ok(changed)
+}
+
+/// Committed together with the records from each page. The tail and its holes
+/// survive process death, including a second interruption during a retry.
+#[derive(Serialize, Deserialize)]
+struct FeedCheckpoint {
+    next: u32,
+    total: Option<u32>,
+    at_end: bool,
+    pending: std::collections::BTreeSet<u32>,
+}
+
+impl FeedCheckpoint {
+    fn save(&self, conn: &rusqlite::Connection, source: &str) -> anyhow::Result<()> {
+        store::set_meta(conn, source, "feed_checkpoint", &serde_json::to_string(self)?)
+    }
 }
 
 /// Read the provider's feed, newest updates first.
@@ -346,179 +360,130 @@ pub fn refresh(
     let log = run.log;
     let src = provider.id();
     let name = provider.name();
-    let complete_before = store::get_meta(conn, src, "feed_complete_at")?.is_some();
-    let full = full || !complete_before;
-    if !full {
-        log(&format!("{name}: обновление — читаю новые страницы ленты"));
-    } else if !complete_before {
-        log(&format!(
-            "{name}: полного прохода ещё не было — читаю всю ленту"
-        ));
-    }
+    let saved = store::get_meta(conn, src, "feed_checkpoint")?;
+    let legacy = store::get_meta(conn, src, "feed_resume_page")?.is_some();
+    let full = full || saved.is_some() || legacy || store::get_meta(conn, src, "feed_complete_at")?.is_none();
+    let mut checkpoint = match saved.as_deref() {
+        Some(raw) => serde_json::from_str::<FeedCheckpoint>(raw)?,
+        None => FeedCheckpoint { next: 1, total: None, at_end: false, pending: Default::default() },
+    };
     let mut rep = RefreshReport {
         mode: if full { "full" } else { "update" }.into(),
+        resumed_from: saved.as_ref().map(|_| {
+            if checkpoint.at_end { checkpoint.pending.first().copied().unwrap_or(1) } else { checkpoint.next }
+        }),
+        pages_total: checkpoint.total,
         started_at: store::stamp(),
         ..Default::default()
     };
+    if full {
+        // Old cursors didn't record skipped pages. Replay once; upserts retain existing details.
+        let tx = conn.unchecked_transaction()?;
+        store::del_meta(&tx, src, "feed_complete_at")?;
+        store::del_meta(&tx, src, "feed_resume_page")?;
+        checkpoint.save(&tx, src)?;
+        tx.commit()?;
+    }
+    if let Some(p) = rep.resumed_from {
+        log(&format!("{name}: продолжаю загрузку со страницы {p}"));
+    } else if legacy {
+        log("Перепроверяю ленту: прежняя версия не сохраняла очередь непрочитанных страниц.");
+    }
+
+    #[derive(PartialEq)]
+    enum Pass { Scan, Retry, Head }
     let mut seen = std::collections::HashSet::new();
+    let mut head = 1u32;
+    let mut quiet = 0;
+    let mut retry_after = 0;
+    let mut head_finished = false;
     load_cooldown(provider, conn)?;
-    let finish = |rep: &mut RefreshReport| -> anyhow::Result<()> {
-        rep.cancelled = (run.stop)();
-        if rep.cancelled {
-            // not the site's doing: nothing to warn about, the next run continues
-            rep.stopped = None;
-            rep.complete = false;
-        }
-        rep.duplicates = store::duplicate_count(conn, src)?;
-        rep.finished_at = store::stamp();
-        store::set_meta(conn, src, "last_report", &serde_json::to_string(rep)?)?;
-        store::set_meta(conn, src, "listed_at", &store::stamp())?;
-        store::set_meta(
-            conn,
-            src,
-            "last_error",
-            rep.stopped.as_deref().unwrap_or(""),
-        )?;
-        Ok(())
-    };
     if let Err(e) = with_retry(provider, run, |p| p.prepare()) {
         rep.stopped = Some(e.to_string());
-        log(&format!("{name}: {e}"));
-        save_cooldown(provider, conn)?;
-        finish(&mut rep)?;
-        return Ok(rep);
     }
-    // pages: a full pass may continue from where an interrupted one stopped
-    let mut page = 1;
-    if full {
-        if let Some(p) =
-            store::get_meta(conn, src, "feed_resume_page")?.and_then(|p| p.parse().ok())
-        {
-            if p > 1 {
-                page = p;
-                rep.resumed_from = Some(p);
-                log(&format!(
-                    "{name}: продолжаю прерванную загрузку со страницы {p}"
-                ));
-            }
-        }
-    }
-    let mut quiet_pages = 0;
-    let mut topping_up = false; // full pass: re-reading the first pages at the end
-    loop {
+    while rep.stopped.is_none() && !(run.stop)() {
+        let (pass, page) = if full && !checkpoint.at_end {
+            (Pass::Scan, checkpoint.next)
+        } else if let Some(&p) = checkpoint.pending.range((std::ops::Bound::Excluded(retry_after), std::ops::Bound::Unbounded)).next() {
+            retry_after = p;
+            (Pass::Retry, p)
+        } else if !checkpoint.pending.is_empty() {
+            break;
+        } else if full && checkpoint.next <= 3 && saved.is_none() {
+            head_finished = true;
+            break;
+        } else {
+            (Pass::Head, head)
+        };
         if page > max_pages {
-            log(&format!("{name}: достигнут предел {max_pages} страниц"));
+            rep.stopped = Some(format!("достигнут предел {max_pages} страниц"));
             break;
         }
         let list = match with_retry(provider, run, |p| p.list(page)) {
-            Ok(l) => l,
-            Err(
-                e @ (ProviderError::Blocked(_)
-                | ProviderError::RateLimited { .. }
-                | ProviderError::Cancelled),
-            ) => {
+            Ok(list) => Some(list),
+            Err(e @ (ProviderError::Blocked(_) | ProviderError::RateLimited { .. } | ProviderError::Cancelled)) => {
                 rep.stopped = Some(e.to_string());
-                log(&format!("{name}: {e}"));
                 break;
             }
             Err(e) => {
-                rep.pages_failed.push(page);
-                rep.errors += 1;
                 log(&format!("{name}: страница {page} не прочитана: {e}"));
-                if !full {
-                    break;
-                }
-                page += 1;
-                continue;
+                None
             }
         };
-        if let Some(t) = list.total_pages {
-            rep.pages_total = Some(t);
+        let tx = conn.unchecked_transaction()?;
+        let mut changed = 0;
+        let mut empty = false;
+        let clean = list.as_ref().is_some_and(|l| l.bad_items == 0);
+        if let Some(list) = list {
+            rep.pages_total = list.total_pages.or(rep.pages_total);
+            checkpoint.total = rep.pages_total;
+            empty = list.games.is_empty() && clean;
+            changed = ingest(&tx, &list.games, &mut seen, pass != Pass::Scan, &mut rep)?;
+            if pass != Pass::Head || !full { rep.pages_read += 1; }
         }
-        // pages read again at the end of a full pass are not new pages of the feed
-        if !topping_up {
-            rep.pages_read += 1;
+        if clean { checkpoint.pending.remove(&page); } else { checkpoint.pending.insert(page); }
+        let last = rep.pages_total.map_or(empty, |total| page >= total);
+        if pass == Pass::Scan && (clean || rep.pages_total.is_some()) {
+            checkpoint.at_end = last;
+            checkpoint.next = page.saturating_add(1);
         }
-        rep.errors += list.bad_items;
-        let changed = ingest(conn, &list.games, &mut seen, topping_up, &mut rep)?;
-        if !topping_up {
+        if full || !clean {
+            checkpoint.save(&tx, src)?;
+            if !full { store::del_meta(&tx, src, "feed_complete_at")?; }
+        }
+        tx.commit()?;
+        if pass == Pass::Scan || !full {
             (run.progress)("external", page as u64, rep.pages_total.map(u64::from));
         }
-        log(&format!(
-            "{name}: страница {page}{} — найдено {}, новых {}, обновлённых {}",
-            rep.pages_total
-                .map(|t| format!(" из {t}"))
-                .unwrap_or_default(),
-            rep.discovered,
-            rep.new,
-            rep.updated
-        ));
-        quiet_pages = if changed == 0 { quiet_pages + 1 } else { 0 };
-        let last = list.games.is_empty() || rep.pages_total.is_some_and(|t| page >= t);
-        if !full || topping_up {
-            if quiet_pages >= 2 || last {
+        log(&format!("{name}: страница {page}, новых: {}, обновлённых: {}", rep.new, rep.updated));
+        if !clean && (pass == Pass::Head || rep.pages_total.is_none()) { break; }
+        if pass == Pass::Head {
+            quiet = if changed == 0 { quiet + 1 } else { 0 };
+            if quiet >= 2 || last {
+                head_finished = true;
                 break;
             }
-            page += 1;
-            continue;
+            head += 1;
         }
-        store::set_meta(conn, src, "feed_resume_page", &(page + 1).to_string())?;
-        if last {
-            // pages that failed during the pass get one more chance now
-            if !rep.pages_failed.is_empty() {
-                let failed = std::mem::take(&mut rep.pages_failed);
-                log(&format!(
-                    "{name}: повторно читаю непрочитанные страницы: {failed:?}"
-                ));
-                for fp in failed {
-                    match with_retry(provider, run, |p| p.list(fp)) {
-                        Ok(l) => {
-                            rep.pages_read += 1;
-                            rep.errors = rep.errors.saturating_sub(1) + l.bad_items;
-                            ingest(conn, &l.games, &mut seen, true, &mut rep)?;
-                            log(&format!(
-                                "{name}: страница {fp} прочитана со второй попытки"
-                            ));
-                        }
-                        Err(
-                            e @ (ProviderError::Blocked(_)
-                            | ProviderError::RateLimited { .. }
-                            | ProviderError::Cancelled),
-                        ) => {
-                            rep.pages_failed.push(fp);
-                            rep.stopped = Some(e.to_string());
-                            log(&format!("{name}: {e}"));
-                            break;
-                        }
-                        Err(e) => {
-                            rep.pages_failed.push(fp);
-                            log(&format!("{name}: страница {fp} снова не прочитана: {e}"));
-                        }
-                    }
-                }
-                if rep.stopped.is_some() {
-                    break;
-                }
-            }
-            // the whole feed is read; releases that moved to the top meanwhile are caught by
-            // reading the first pages again until two of them bring nothing
-            rep.complete = rep.pages_failed.is_empty();
-            if rep.resumed_from.is_some() || rep.pages_read > 2 {
-                topping_up = true;
-                quiet_pages = 0;
-                page = 1;
-                continue;
-            }
-            break;
-        }
-        page += 1;
     }
-    if full && rep.complete && rep.stopped.is_none() && !(run.stop)() {
-        store::del_meta(conn, src, "feed_resume_page")?;
-        store::set_meta(conn, src, "feed_complete_at", &store::stamp())?;
+    rep.pages_failed = checkpoint.pending.iter().copied().collect();
+    rep.errors = rep.pages_failed.len();
+    rep.cancelled = (run.stop)();
+    if rep.cancelled { rep.stopped = None; }
+    rep.complete = full && checkpoint.at_end && head_finished && rep.pages_failed.is_empty()
+        && !rep.cancelled && rep.stopped.is_none();
+    let tx = conn.unchecked_transaction()?;
+    if rep.complete {
+        store::del_meta(&tx, src, "feed_checkpoint")?;
+        store::set_meta(&tx, src, "feed_complete_at", &store::stamp())?;
     }
-    save_cooldown(provider, conn)?;
-    finish(&mut rep)?;
+    rep.finished_at = store::stamp();
+    rep.duplicates = store::duplicate_count(&tx, src)?;
+    store::set_meta(&tx, src, "last_report", &serde_json::to_string(&rep)?)?;
+    store::set_meta(&tx, src, "listed_at", &rep.finished_at)?;
+    store::set_meta(&tx, src, "last_error", rep.stopped.as_deref().unwrap_or(""))?;
+    save_cooldown(provider, &tx)?;
+    tx.commit()?;
     Ok(rep)
 }
 
@@ -1077,6 +1042,28 @@ mod tests {
         assert!(store::get_meta(&conn, "fake", "feed_complete_at")
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn resumed_pass_repairs_an_earlier_hole_before_reporting_complete() {
+        let conn = store::open_memory();
+        let mut p = Fake::new(pages(55, 1));
+        p.fail_at = Some(20);
+        p.blocked_at = Some(50);
+        let first = refresh(&mut p, &conn, true, 100, &Run::quiet()).unwrap();
+        assert_eq!(first.pages_failed, [20]);
+        assert!(!first.complete);
+        p.blocked_at = None;
+        let second = refresh(&mut p, &conn, false, 100, &Run::quiet()).unwrap();
+        assert_eq!(second.resumed_from, Some(50));
+        assert_eq!(second.pages_failed, [20]);
+        assert!(!second.complete);
+        p.fail_at = None;
+        p.calls.clear();
+        let last = refresh(&mut p, &conn, false, 100, &Run::quiet()).unwrap();
+        assert_eq!(p.calls[0], 20);
+        assert!(last.complete && last.pages_failed.is_empty());
+        assert_eq!(store::stats(&conn, "fake").unwrap().stored, 55);
     }
 
     #[test]

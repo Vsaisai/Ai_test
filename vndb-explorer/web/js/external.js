@@ -2,7 +2,7 @@
 // Shown only in the "show everything" content mode with the catalog switched on in Settings.
 import { api } from './api.js';
 import { settings, save } from './store.js';
-import { h, spinner, errorBox, toast, debounce, jobPanel } from './ui.js';
+import { h, spinner, errorBox, toast, debounce, jobPanel, MARKS } from './ui.js';
 
 export const extOn = () => !!settings().adultTags && !!settings().f95;
 
@@ -305,6 +305,20 @@ export async function viewExtGame(root, id) {
     return;
   }
   document.title = `${g.title} — VN Shelf`;
+  const mark = h('select', { 'aria-label': 'Моя полка' },
+    h('option', { value: '' }, 'Без полки'),
+    Object.entries(MARKS).map(([key, m]) => h('option', { value: key }, m.label)));
+  mark.value = g.mark || '';
+  mark.onchange = async () => {
+    mark.disabled = true;
+    try {
+      const key = `f95-${g.ext_id}`;
+      if (mark.value) await api.quickMark(key, mark.value);
+      else await api.unmark(key);
+      g.mark = mark.value;
+    } catch (e) { mark.value = g.mark || ''; toast(e.message); }
+    finally { mark.disabled = false; }
+  };
   const facts = [
     ['Разработчик', g.developer], ['Версия', g.version], ['Статус', STATUS[g.status]], ['Движок', g.engine],
     ['Обновлено', fmtDate(g.updated)], ['Рейтинг на F95Zone', g.rating ? `${g.rating.toFixed(1)} из 5` : ''],
@@ -315,6 +329,7 @@ export async function viewExtGame(root, id) {
       extCover(g.cover, g.title, 'cover big'),
       h('div', { class: 'vn-head' },
         h('h1', {}, g.title),
+        h('label', {}, 'Моя полка ', mark),
         h('dl', { class: 'meta' }, facts.flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, v)])),
         g.vndb_id ? h('p', {}, h('a', { class: 'btn primary', href: `#/vn/${g.vndb_id}` }, `Открыть в каталоге VNDB${g.vndb_title ? `: ${g.vndb_title}` : ''}`)) : null)),
     matchBox(g, () => viewExtGame(root, id)),

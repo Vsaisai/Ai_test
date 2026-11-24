@@ -11,17 +11,19 @@
 
 ## Скачать
 
+Войдите в GitLab под аккаунтом с доступом к проекту. В артефактах задания откройте `vndb-explorer/target/dist/` для ПК или `vndb-explorer/target/apk/` для Android. APK из ветки может иметь тестовую подпись. Для обновления установленного приложения нужен APK с той же подписью.
+
 | Система | Что скачать | Как запустить |
 |---|---|---|
-| **Windows** 10/11 (x64) | `VNShelf-…-windows-x64.zip` из [релизов для ПК](https://github.com/Vsaisai/Ai_test/releases?q=pc-v&expanded=true) | распаковать → `Start VN Shelf.bat` |
-| **Linux** (x64) | `VNShelf-…-linux-x64.zip` из [релизов для ПК](https://github.com/Vsaisai/Ai_test/releases?q=pc-v&expanded=true) | распаковать → `./start-vn-shelf.sh` |
-| **macOS** (Apple Silicon) | `VNShelf-…-macos-arm64.zip` из [релизов для ПК](https://github.com/Vsaisai/Ai_test/releases?q=pc-v&expanded=true) | распаковать → `Start VN Shelf.command` |
-| **Android** 7.0+ | `VNShelf-….apk` из [релизов для Android](https://github.com/Vsaisai/Ai_test/releases?q=mobile-v&expanded=true) | установить APK |
+| **Windows** 10/11 (x64) | `VNShelf-…-windows-x64.zip` из [сборки GitLab](https://gitlab.com/Asgefka/Ai_test/-/jobs/artifacts/beta/browse?job=windows-package) | распаковать → `Start VN Shelf.bat` |
+| **Linux** (x64) | `VNShelf-…-linux-x64.zip` из [сборки GitLab](https://gitlab.com/Asgefka/Ai_test/-/jobs/artifacts/beta/browse?job=linux-package) | распаковать → `./start-vn-shelf.sh` |
+| **macOS** (Apple Silicon) | [Сборка из исходников](https://gitlab.com/Asgefka/Ai_test/-/blob/beta/vndb-explorer/README.md#готовые-сборки) | запустить `Start VN Shelf.command` |
+| **Android** 7.0+ | `VNShelf-….apk` из [сборки GitLab](https://gitlab.com/Asgefka/Ai_test/-/jobs/artifacts/mobile/browse?job=android-apk) | установить APK |
 
 При первом запуске нажмите **«Скачать базу VNDB»** (~190 МБ, 1–3 минуты). Загрузка докачивается после обрыва
 связи, на телефоне её прогресс виден в уведомлении.
 
-Все версии — на странице [Releases](https://github.com/Vsaisai/Ai_test/releases).
+История версий — в [GitLab Releases](https://gitlab.com/Asgefka/Ai_test/-/releases). У импортированных записей могут отсутствовать файлы сборок.
 
 ## Возможности
 
@@ -46,7 +48,7 @@
   можно переключиться на оригинал. Удержание тега показывает, что он значит.
 - **ПК или телефон.** Можно показывать только новеллы, в которые можно играть на ПК или на телефоне.
 - **Мои полки:** «Хочу», «Читаю», «Прочитано», «Брошено», «Любимое».
-- **Обновления сами.** Android-приложение обновляется изнутри, без браузера.
+- **Обновления сами.** В настройках Android есть ссылка на сборки GitLab. Для закрытого проекта потребуется вход через браузер.
 - **Новые релизы VNDB.** Новые новеллы и релизы подтягиваются через API VNDB. Если база сильно отстала,
   приложение предложит скачать её заново целиком.
 - **ПК и телефон.** На ПК есть режим для домашней сети: можно открыть каталог с телефона по адресу
@@ -75,8 +77,8 @@ vndb-explorer/
 | Ветка | Что в ней |
 |---|---|
 | `main` | основная |
-| `beta` | разработка ядра и ПК-версии; при изменении `vndb-explorer/VERSION` собирается релиз `pc-v…` |
-| `mobile` | Android-приложение; при изменении `vndb-explorer/mobile/VERSION` собирается релиз `mobile-v…` |
+| `beta` | разработка ядра и ПК-версии; релиз по тегу `pc-v…`, совпадающему с версией в `vndb-explorer/VERSION` |
+| `mobile` | Android-приложение; релиз по тегу `mobile-v…`, совпадающему с версией в `vndb-explorer/mobile/VERSION` |
 
 **Номер версии** — `A.B.C` или `A.B.C.D`: мелкая правка увеличивает четвёртую часть (`0.4.7` → `0.4.7.1` → `0.4.7.2`),
 новый этап — третью или вторую (`0.4.8`, `0.5`, `1.0`), когда приложение готово или мелких правок накопилось на этап.

@@ -25,7 +25,7 @@ android {
 
     signingConfigs {
         release {
-            // Real releases: provide a keystore through the environment (GitHub secrets).
+            // Real releases: provide a keystore through the environment (GitLab CI/CD variables).
             // Otherwise the committed debug keystore is used so that updates install over each other.
             def ks = System.getenv('VNSHELF_KEYSTORE')
             storeFile file(ks ?: 'debug.keystore')

@@ -91,7 +91,7 @@ export const api = {
   vn: id => call('GET', `/api/vn/${id}?langs=${encodeURIComponent(langList().join(','))}&any_lang=false`),
   similar: id => call('GET', `/api/vn/${id}/similar?langs=${encodeURIComponent(langList().join(','))}&adult=${settings().adultTags ? 1 : 0}&hide_ero=${settings().hideAdult ? 1 : 0}`),
   prices: (id, cc) => call('GET', `/api/vn/${id}/prices?cc=${encodeURIComponent(cc)}`),
-  my: () => call('GET', '/api/my'),
+  my: (external = false) => call('GET', `/api/my?external=${external}`),
   myExport: () => call('GET', '/api/my/export'),
   myExportUrl: () => `${base()}/api/my/export`,
   myImport: (data, replace) => call('POST', '/api/my/import', { ...data, replace }),

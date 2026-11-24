@@ -130,7 +130,7 @@ impl F95Zone {
         if self.http.is_none() {
             let c = reqwest::blocking::Client::builder()
                 .user_agent(format!(
-                    "VNShelf/{} (game catalog; +https://github.com/Vsaisai/Ai_test)",
+                    "VNShelf/{} (game catalog; +https://gitlab.com/Asgefka/Ai_test)",
                     crate::app_version()
                 ))
                 .timeout(Duration::from_secs(30))

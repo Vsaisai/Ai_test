@@ -48,8 +48,8 @@ public final class Updater {
         if ("downloading".equals(state) || "installing".equals(state)) {
             return "busy";
         }
-        // only the public release asset on GitHub (https, redirects to the download host)
-        if (url == null || !url.startsWith("https://github.com/")) {
+        // Only versioned APK assets published by this GitLab project.
+        if (url == null || !url.matches("https://gitlab\\.com/Asgefka/Ai_test/-/releases/mobile-v([0-9]+(?:\\.[0-9]+){2,3})/downloads/VNShelf-\\1\\.apk")) {
             state = "error";
             error = "bad url";
             return "ok";

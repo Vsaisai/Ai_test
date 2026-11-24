@@ -1,5 +1,6 @@
+import { latestRelease } from './releases.js';
 // Entry point: navigation + hash router.
-import { applyTheme, settings, save, IN_APP, APP_VERSION, RELEASES_PAGE } from './store.js';
+import { applyTheme, settings, save, IN_APP, APP_VERSION, ANDROID_BUILDS, RELEASES_PAGE } from './store.js';
 import { h, jobPanel, progressLine } from './ui.js';
 import { installTagTips } from './tagtip.js';
 import { installQuickMark } from './quickmark.js';
@@ -184,48 +185,29 @@ function newer(a, b) {
   return false;
 }
 
-// Releases of the Android app (public repository, no token needed).
-const RELEASES_API = 'https://api.github.com/repos/Vsaisai/vnshelf-releases/releases?per_page=20';
-
-/** The newest `mobile-v*` release: {version, size, url, page} or null. */
-async function latestRelease() {
-  let r;
-  try {
-    r = await fetch(RELEASES_API, { headers: { Accept: 'application/vnd.github+json' } });
-  } catch {
-    throw new Error('Нет связи с GitHub. Проверьте интернет и повторите.');
-  }
-  if (r.status === 403 || r.status === 429) throw new Error('GitHub временно ограничил проверки — попробуйте через час.');
-  if (!r.ok) throw new Error(`GitHub: HTTP ${r.status}`);
-  const rel = (await r.json()).find(x => !x.draft && !x.prerelease && /^mobile-v/.test(x.tag_name));
-  if (!rel) return null;
-  const apk = (rel.assets || []).find(a => a.name.endsWith('.apk'));
-  return { version: rel.tag_name.replace(/^mobile-v/, ''), size: apk?.size, url: apk?.browser_download_url, page: rel.html_url };
-}
-
 /** Check for a newer app version. `show`: where to write the result (default: the banner on top). */
 export async function checkAppUpdate({ interactive = false, show = null } = {}) {
   if (!IN_APP) return null;
   const out = show || showAppBanner;
   if (!interactive && Date.now() - (settings().lastAppCheck || 0) < 24 * 3600 * 1000) return null;
-  // remember the attempt even when it fails: GitHub limits anonymous checks to 60 per hour
+  // remember the attempt even when it fails: avoid repeated background requests
   save({ lastAppCheck: Date.now() });
   let rel;
   try {
-    rel = await latestRelease();
+    rel = await latestRelease('mobile');
   } catch (e) {
-    if (interactive) out(`⚠️ ${e.message}`, [h('a', { class: 'btn', href: RELEASES_PAGE }, 'Скачать вручную')]);
+    if (interactive) out(`⚠️ ${e.message}`, [h('a', { class: 'btn', href: ANDROID_BUILDS }, 'Сборки Android'), h('a', { class: 'btn', href: RELEASES_PAGE }, 'Релизы GitLab')]);
     return null;
   }
-  if (!rel || !rel.url) {
+  if (!rel) {
     if (interactive) out('Релизов приложения пока нет.');
   } else if (newer(rel.version, APP_VERSION)) {
     const size = rel.size ? ` (${(rel.size / 1048576).toFixed(1).replace('.', ',')} МБ)` : '';
-    const canSelf = !!window.VNShelfNative?.startUpdate;
+    const canSelf = rel.url && !!window.VNShelfNative?.startUpdate;
     out(`⬆️ Доступна версия ${rel.version} (у вас ${APP_VERSION}).`, [
       canSelf
         ? h('button', { class: 'btn primary', onclick: () => selfUpdate(rel.url, rel.version, out) }, `Обновить${size}`)
-        : h('a', { class: 'btn primary', href: rel.url }, `Скачать APK${size}`),
+        : h('a', { class: 'btn primary', href: rel.url || ANDROID_BUILDS }, `Скачать APK${size}`),
       h('a', { class: 'btn', href: rel.page || RELEASES_PAGE }, 'Что нового')]);
   } else if (interactive) {
     out(`✅ У вас последняя версия ${APP_VERSION}.`);
@@ -234,21 +216,17 @@ export async function checkAppUpdate({ interactive = false, show = null } = {}) 
 }
 
 /** PC (browser on a desktop, not the Android app or a touch screen): a new `pc-v*` build is out?
- *  At most once a day; any failure (offline, GitHub limit) is silent and changes nothing. */
+ *  At most once a day; any failure (offline, rate limit) is silent and changes nothing. */
 async function checkPcUpdate() {
   if (IN_APP || document.documentElement.classList.contains('touch-nav')) return;
   if (Date.now() - (settings().lastPcCheck || 0) < 24 * 3600 * 1000) return;
   save({ lastPcCheck: Date.now() });
   try {
-    const [info, r] = await Promise.all([api.info(), fetch(RELEASES_API, { headers: { Accept: 'application/vnd.github+json' } })]);
-    if (!r.ok || !info.version) return;
-    // only PC builds count: the Android releases (and GitHub's "latest") are ignored
-    const rel = (await r.json()).find(x => !x.draft && !x.prerelease && /^pc-v/.test(x.tag_name));
-    if (!rel) return;
-    const ver = rel.tag_name.replace(/^pc-v/, '');
-    if (!newer(ver, info.version)) return;
+    const [info, rel] = await Promise.all([api.info(), latestRelease('pc')]);
+    if (!rel || !info.version || !newer(rel.version, info.version)) return;
+    const ver = rel.version;
     showAppBanner(`Вышла версия ${ver} для ПК (у вас ${info.version}). Распакуйте её в новую папку и перенесите туда server/data.`, [
-      h('a', { class: 'btn primary', href: rel.html_url, target: '_blank', rel: 'noopener' }, 'Скачать')]);
+      h('a', { class: 'btn primary', href: rel.page, target: '_blank', rel: 'noopener' }, 'Скачать')]);
   } catch { /* no banner */ }
 }
 
