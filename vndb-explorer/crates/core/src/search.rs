@@ -198,7 +198,9 @@ pub struct SearchResponse {
     pub tag_counts: Option<std::collections::HashMap<u32, u32>>,
 }
 
-struct Compiled {
+/// Pre-computed tag sets and lower-cased words so a full catalog scan does not recompute them
+/// per VN. Built once per search; everything inside is read-only afterwards.
+pub struct Query {
     must: Vec<TagSet>,
     want: Vec<(u32, TagSet)>,
     exclude: Vec<TagSet>,
@@ -206,10 +208,76 @@ struct Compiled {
     words: Vec<String>,
 }
 
+/// Tags resolved from the request plus the compiled [`Query`].
+struct Prepared {
+    must: Vec<ResolvedTag>,
+    want: Vec<ResolvedTag>,
+    exclude: Vec<ResolvedTag>,
+    comp: Query,
+    warnings: Vec<String>,
+}
+
+fn prepare(cat: &Catalog, req: &SearchRequest) -> Prepared {
+    let mut warnings = Vec::new();
+    let mut resolve = |list: &[String]| -> Vec<ResolvedTag> {
+        let mut out = Vec::new();
+        for s in list {
+            match cat.tree.resolve(s) {
+                Ok(id) => {
+                    if !out.iter().any(|r: &ResolvedTag| r.id == id) {
+                        out.push(ResolvedTag {
+                            id,
+                            name: cat.tree.get(id).map(|t| t.name.clone()).unwrap_or_default(),
+                        })
+                    }
+                }
+                Err(e) => warnings.push(e.to_string()),
+            }
+        }
+        out
+    };
+    let must = resolve(&req.must);
+    let want = resolve(&req.want);
+    let exclude = resolve(&req.exclude);
+    let comp = Query {
+        must: must.iter().map(|t| cat.tree.subtree(t.id)).collect(),
+        want: want
+            .iter()
+            .map(|t| (t.id, cat.tree.subtree(t.id)))
+            .collect(),
+        exclude: exclude.iter().map(|t| cat.tree.subtree(t.id)).collect(),
+        ero: cat.ero_tag_root.map(|r| cat.tree.subtree(r)),
+        words: req
+            .text
+            .as_deref()
+            .unwrap_or("")
+            .to_lowercase()
+            .split_whitespace()
+            .map(String::from)
+            .collect(),
+    };
+    Prepared {
+        must,
+        want,
+        exclude,
+        comp,
+        warnings,
+    }
+}
+
 fn has(v: &Vn, set: &TagSet, req: &SearchRequest) -> bool {
     v.tags.iter().any(|t| {
         !t.lie && t.spoiler <= req.spoiler && t.rating >= req.min_level && set.contains(t.tag)
     })
+}
+
+/// Does the VN carry every wanted tag (sub-tags count)? Used to skip the per-tag matched/missing
+/// bookkeeping for the common case of an exact hit on all wanted tags.
+fn has_all_wanted(v: &Vn, q: &Query, req: &SearchRequest) -> bool {
+    if q.want.is_empty() {
+        return true;
+    }
+    q.want.iter().all(|(_, s)| has(v, s, req))
 }
 
 pub fn card(v: &Vn, order: &[String], matched: Vec<u32>, missing: Vec<u32>) -> Card {
@@ -274,61 +342,48 @@ fn lang_ok(v: &Vn, req: &SearchRequest, split: bool) -> bool {
     }
 }
 
-pub fn search(cat: &Catalog, req: &SearchRequest) -> Result<SearchResponse> {
-    let mut warnings = Vec::new();
-    let mut resolve = |list: &[String]| -> Vec<ResolvedTag> {
-        let mut out = Vec::new();
-        for s in list {
-            match cat.tree.resolve(s) {
-                Ok(id) => {
-                    if !out.iter().any(|r: &ResolvedTag| r.id == id) {
-                        out.push(ResolvedTag {
-                            id,
-                            name: cat.tree.get(id).map(|t| t.name.clone()).unwrap_or_default(),
-                        })
-                    }
-                }
-                Err(e) => warnings.push(e.to_string()),
-            }
+/// A search candidate: reference plus the data needed for sorting (so no field is recomputed
+/// inside the comparator).
+struct Hit<'a> {
+    v: &'a Vn,
+    matched: Vec<u32>,
+    missing: Vec<u32>,
+    title: String,
+    lower_title: String,
+    text_score: u8,
+}
+
+impl<'a> Hit<'a> {
+    fn cmp_title(&self, other: &Self) -> std::cmp::Ordering {
+        self.lower_title.cmp(&other.lower_title)
+    }
+    /// Rating treated as 0 when there are no votes.
+    fn rating(&self) -> f32 {
+        if self.v.votecount == 0 {
+            0.0
+        } else {
+            self.v.rating
         }
-        out
-    };
-    let must = resolve(&req.must);
-    let want = resolve(&req.want);
-    let exclude = resolve(&req.exclude);
-    let comp = Compiled {
-        must: must.iter().map(|t| cat.tree.subtree(t.id)).collect(),
-        want: want
-            .iter()
-            .map(|t| (t.id, cat.tree.subtree(t.id)))
-            .collect(),
-        exclude: exclude.iter().map(|t| cat.tree.subtree(t.id)).collect(),
-        ero: cat.ero_tag_root.map(|r| cat.tree.subtree(r)),
-        words: req
-            .text
-            .as_deref()
-            .unwrap_or("")
-            .to_lowercase()
-            .split_whitespace()
-            .map(String::from)
-            .collect(),
-    };
+    }
+    /// Release date usable as a sort key: unknown/9999 dates sink to the bottom of "newest".
+    fn released_key(&self) -> u32 {
+        if self.v.released == 99999999 {
+            0
+        } else {
+            self.v.released
+        }
+    }
+}
+
+fn scan<'a>(cat: &'a Catalog, req: &SearchRequest, comp: &Query) -> Vec<Hit<'a>> {
     // Wanted tags only rank results unless a minimum is asked for explicitly.
     let min_match = req.min_match.unwrap_or(0);
     let ids: Option<std::collections::HashSet<u32>> =
         req.ids.as_ref().map(|v| v.iter().copied().collect());
-
-    struct Hit<'a> {
-        v: &'a Vn,
-        matched: Vec<u32>,
-        missing: Vec<u32>,
-        title: String,
-        text_score: u8,
-    }
     let order = &req.langs;
     let today = today_yyyymmdd();
     let mut hits: Vec<Hit> = Vec::new();
-    for v in &cat.vns {
+    'vn: for v in &cat.vns {
         if let Some(ids) = &ids {
             if !ids.contains(&v.id) {
                 continue;
@@ -352,6 +407,7 @@ pub fn search(cat: &Catalog, req: &SearchRequest) -> Result<SearchResponse> {
             EroMode::Only if !is_ero => continue,
             _ => {}
         }
+        // Cheap numeric/date checks first, tag-bitset checks last.
         if req.hide_cancelled && v.devstatus == 2 {
             continue;
         }
@@ -407,16 +463,15 @@ pub fn search(cat: &Catalog, req: &SearchRequest) -> Result<SearchResponse> {
         if comp.exclude.iter().any(|s| has(v, s, req)) {
             continue;
         }
+        // Words must all be present: the loop below fails fast on the first missing word.
         let mut text_score = 0;
         if !comp.words.is_empty() {
-            if !comp
-                .words
-                .iter()
-                .all(|w| v.search_text.contains(w.as_str()))
-            {
-                continue;
-            }
             let full = comp.words.join(" ");
+            for w in &comp.words {
+                if !v.search_text.contains(w.as_str()) {
+                    continue 'vn;
+                }
+            }
             text_score = if v.search_text.lines().any(|l| l == full) {
                 2
             } else if v.search_text.lines().any(|l| l.starts_with(&full)) {
@@ -425,101 +480,109 @@ pub fn search(cat: &Catalog, req: &SearchRequest) -> Result<SearchResponse> {
                 0
             };
         }
-        let mut matched = Vec::new();
-        let mut missing = Vec::new();
-        for (id, s) in &comp.want {
-            if has(v, s, req) {
-                matched.push(*id)
-            } else {
-                missing.push(*id)
+        // Most VNs either match every wanted tag or none of them; only pay for the
+        // matched/missing vectors when the result is partial.
+        let (matched, missing) = if has_all_wanted(v, comp, req) {
+            (comp.want.iter().map(|(id, _)| *id).collect(), Vec::new())
+        } else {
+            let mut matched = Vec::new();
+            let mut missing = Vec::new();
+            for (id, s) in &comp.want {
+                if has(v, s, req) {
+                    matched.push(*id)
+                } else {
+                    missing.push(*id)
+                }
             }
-        }
+            (matched, missing)
+        };
         if matched.len() < min_match {
             continue;
         }
+        let title = cat.display_title(v, order);
         hits.push(Hit {
             v,
-            title: v.display_title(order),
+            lower_title: title.to_lowercase(),
+            title,
             matched,
             missing,
             text_score,
         });
     }
+    hits
+}
 
-    let by_title = |a: &Hit, b: &Hit| a.title.to_lowercase().cmp(&b.title.to_lowercase());
+pub fn search(cat: &Catalog, req: &SearchRequest) -> Result<SearchResponse> {
+    let Prepared {
+        must,
+        want,
+        exclude,
+        comp,
+        warnings,
+    } = prepare(cat, req);
+    let mut hits = scan(cat, req, &comp);
+
     let given: std::collections::HashMap<u32, usize> = req
         .ids
         .as_ref()
         .map(|v| v.iter().enumerate().map(|(i, id)| (*id, i)).collect())
         .unwrap_or_default();
-    let rating = |h: &Hit| if h.v.votecount == 0 { 0.0 } else { h.v.rating };
-    hits.sort_by(|a, b| match req.sort {
+    hits.sort_unstable_by(|a, b| match req.sort {
         Sort::Relevance => {
             if !comp.want.is_empty() {
                 b.missing
                     .is_empty()
                     .cmp(&a.missing.is_empty())
                     .then(b.matched.len().cmp(&a.matched.len()))
-                    .then_with(|| by_title(a, b))
+                    .then_with(|| a.cmp_title(b))
             } else {
                 b.text_score
                     .cmp(&a.text_score)
                     .then(b.v.votecount.cmp(&a.v.votecount))
-                    .then_with(|| by_title(a, b))
+                    .then_with(|| a.cmp_title(b))
             }
         }
-        Sort::Rating => rating(b)
-            .total_cmp(&rating(a))
+        Sort::Rating => b
+            .rating()
+            .total_cmp(&a.rating())
             .then(b.v.votecount.cmp(&a.v.votecount)),
-        Sort::Votes => {
-            b.v.votecount
-                .cmp(&a.v.votecount)
-                .then_with(|| by_title(a, b))
-        }
-        Sort::Newest => {
-            let k = |h: &Hit| {
-                if h.v.released == 99999999 {
-                    0
-                } else {
-                    h.v.released
-                }
-            };
-            k(b).cmp(&k(a)).then_with(|| by_title(a, b))
-        }
+        Sort::Votes => b
+            .v
+            .votecount
+            .cmp(&a.v.votecount)
+            .then_with(|| a.cmp_title(b)),
+        Sort::Newest => b
+            .released_key()
+            .cmp(&a.released_key())
+            .then_with(|| a.cmp_title(b)),
         Sort::Oldest => {
-            let k = |h: &Hit| {
-                if h.v.released == 0 {
-                    u32::MAX
-                } else {
-                    h.v.released
-                }
-            };
-            k(a).cmp(&k(b)).then_with(|| by_title(a, b))
+            let k = |h: &Hit| if h.v.released == 0 { u32::MAX } else { h.v.released };
+            k(a).cmp(&k(b)).then_with(|| a.cmp_title(b))
         }
-        Sort::Title => by_title(a, b),
+        Sort::Title => a.cmp_title(b),
         Sort::Given => given
             .get(&a.v.id)
             .unwrap_or(&usize::MAX)
             .cmp(given.get(&b.v.id).unwrap_or(&usize::MAX))
-            .then_with(|| by_title(a, b)),
-        Sort::Shortest => {
-            a.v.length_minutes
-                .unwrap_or(u32::MAX)
-                .cmp(&b.v.length_minutes.unwrap_or(u32::MAX))
-                .then_with(|| by_title(a, b))
-        }
-        Sort::Longest => {
-            b.v.length_minutes
-                .unwrap_or(0)
-                .cmp(&a.v.length_minutes.unwrap_or(0))
-                .then_with(|| by_title(a, b))
-        }
+            .then_with(|| a.cmp_title(b)),
+        Sort::Shortest => a
+            .v
+            .length_minutes
+            .unwrap_or(u32::MAX)
+            .cmp(&b.v.length_minutes.unwrap_or(u32::MAX))
+            .then_with(|| a.cmp_title(b)),
+        Sort::Longest => b
+            .v
+            .length_minutes
+            .unwrap_or(0)
+            .cmp(&a.v.length_minutes.unwrap_or(0))
+            .then_with(|| a.cmp_title(b)),
     });
 
     let total = hits.len();
     let tag_counts = req.tag_counts.then(|| {
         let mut counts: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
-        let mut seen: Vec<u32> = Vec::new();
+        let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
         for h in &hits {
             seen.clear();
             for t in
@@ -528,11 +591,7 @@ pub fn search(cat: &Catalog, req: &SearchRequest) -> Result<SearchResponse> {
                     .filter(|t| !t.lie && t.spoiler <= req.spoiler && t.rating >= req.min_level)
             {
                 if let Some(anc) = cat.ancestors.get(&t.tag) {
-                    for a in anc {
-                        if !seen.contains(a) {
-                            seen.push(*a);
-                        }
-                    }
+                    seen.extend(anc.iter().copied());
                 }
             }
             for a in &seen {
@@ -542,6 +601,7 @@ pub fn search(cat: &Catalog, req: &SearchRequest) -> Result<SearchResponse> {
         counts
     });
     let limit = req.limit.clamp(1, 500);
+    let order = &req.langs;
     let items = hits
         .into_iter()
         .skip(req.offset)

@@ -5,8 +5,9 @@ use crate::tagtree::TagTree;
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Title {
@@ -68,7 +69,42 @@ pub struct Catalog {
     /// Tag ids under "Sexual Content" or with cat = ero.
     pub ero_tag_root: Option<u32>,
     /// Tag -> itself and all ancestors (for counting tags together with their sub-tags).
-    pub ancestors: HashMap<u32, Vec<u32>>,
+    pub ancestors: HashMap<u32, HashSet<u32>>,
+    /// Display title per preferred-language order, memoized across searches (bounded size).
+    title_cache: Mutex<LruTitles>,
+}
+
+/// Small LRU keeping `display_title` results; the same orders repeat on every request.
+#[derive(Default)]
+struct LruTitles {
+    map: HashMap<(Vec<String>, u32), String>,
+    order: VecDeque<(Vec<String>, u32)>,
+}
+
+const TITLE_CACHE_MAX: usize = 40_000;
+
+impl LruTitles {
+    fn get(&mut self, key: &(Vec<String>, u32)) -> Option<&String> {
+        if let Some(v) = self.map.get(key) {
+            // refresh recency without cloning the key twice
+            if let Some(p) = self.order.iter().position(|k| k == key) {
+                self.order.remove(p);
+            }
+            self.order.push_back(key.clone());
+            return Some(v);
+        }
+        None
+    }
+
+    fn put(&mut self, key: (Vec<String>, u32), value: String) {
+        if self.map.len() >= TITLE_CACHE_MAX {
+            if let Some(old) = self.order.pop_front() {
+                self.map.remove(&old);
+            }
+        }
+        self.order.push_back(key.clone());
+        self.map.insert(key, value);
+    }
 }
 
 impl Vn {
@@ -293,18 +329,14 @@ impl Catalog {
         }
         // tag usage counts (tag itself or any descendant, non-lie, rating > 0)
         let mut counts: HashMap<u32, u32> = HashMap::new();
-        let mut ancestors_cache: HashMap<u32, Vec<u32>> = HashMap::new();
+        let mut ancestors_cache: HashMap<u32, HashSet<u32>> = HashMap::new();
         for v in &vns {
-            let mut seen: Vec<u32> = Vec::new();
+            let mut seen: HashSet<u32> = HashSet::new();
             for t in v.tags.iter().filter(|t| !t.lie) {
                 let anc = ancestors_cache
                     .entry(t.tag)
                     .or_insert_with(|| ancestors(&tree, t.tag));
-                for a in anc.iter() {
-                    if !seen.contains(a) {
-                        seen.push(*a);
-                    }
-                }
+                seen.extend(anc.iter().copied());
             }
             for a in seen {
                 *counts.entry(a).or_default() += 1;
@@ -331,11 +363,28 @@ impl Catalog {
             imported_at,
             ero_tag_root,
             ancestors: ancestors_cache,
+            title_cache: Mutex::new(LruTitles::default()),
         })
     }
 
     pub fn get(&self, id: u32) -> Option<&Vn> {
         self.by_id.get(&id).map(|i| &self.vns[*i])
+    }
+
+    /// `Vn::display_title` memoized across searches (the same language order is requested over
+    /// and over; sorting titles per VN is one of the hot spots of full-catalog scans).
+    pub fn display_title(&self, v: &Vn, order: &[String]) -> String {
+        let key = (order.to_vec(), v.id);
+        if let Ok(mut c) = self.title_cache.lock() {
+            if let Some(t) = c.get(&key) {
+                return t.clone();
+            }
+        }
+        let title = v.display_title(order);
+        if let Ok(mut c) = self.title_cache.lock() {
+            c.put(key, title.clone());
+        }
+        title
     }
 
     pub fn connection(&self) -> Result<Connection> {
@@ -344,16 +393,14 @@ impl Catalog {
 }
 
 /// The tag itself plus every ancestor through all parent links.
-fn ancestors(tree: &TagTree, id: u32) -> Vec<u32> {
-    let mut out = Vec::new();
+fn ancestors(tree: &TagTree, id: u32) -> HashSet<u32> {
+    let mut out = HashSet::new();
     let mut stack = vec![id];
     while let Some(c) = stack.pop() {
-        if out.contains(&c) {
-            continue;
-        }
-        out.push(c);
-        if let Some(t) = tree.get(c) {
-            stack.extend(t.parents.iter().copied());
+        if out.insert(c) {
+            if let Some(t) = tree.get(c) {
+                stack.extend(t.parents.iter().copied());
+            }
         }
     }
     out
