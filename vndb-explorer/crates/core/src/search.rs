@@ -348,7 +348,7 @@ struct Hit<'a> {
     v: &'a Vn,
     matched: Vec<u32>,
     missing: Vec<u32>,
-    title: String,
+    /// Lowercased display title, precomputed once so the comparator never allocates.
     lower_title: String,
     text_score: u8,
 }
@@ -503,7 +503,6 @@ fn scan<'a>(cat: &'a Catalog, req: &SearchRequest, comp: &Query) -> Vec<Hit<'a>>
         hits.push(Hit {
             v,
             lower_title: title.to_lowercase(),
-            title,
             matched,
             missing,
             text_score,
